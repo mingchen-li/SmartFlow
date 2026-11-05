@@ -141,6 +141,9 @@ export type WorkflowParams = z.infer<typeof WorkflowParamsSchema>;
 export * from './workflow';
 export * from './workflow-validation';
 export * from './run';
+export * from './scientific';
+export * from './execution';
+export * from './node-run';
 
 /**
  * `WS /api/terminal` protocol.

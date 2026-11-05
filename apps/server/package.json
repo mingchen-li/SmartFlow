@@ -12,6 +12,7 @@
     "@fastify/websocket": "^11.0.0",
     "@sflow/domain": "workspace:*",
     "@sflow/nodes": "workspace:*",
+    "@sflow/orchestrator": "workspace:*",
     "fastify": "^5.12.8",
     "zod": "^4.6.7"
   },

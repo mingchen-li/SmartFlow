@@ -5,6 +5,7 @@ import fastifyCookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
+import type { NodeRegistry } from '@sflow/domain';
 import { createBuiltinNodeRegistry } from '@sflow/nodes';
 import { LocalExecutor, Orchestrator } from '@sflow/orchestrator';
 import { registerAuthGuard, registerAuthRoutes } from './auth';
@@ -30,6 +31,13 @@ export interface CreateProjectServerOptions {
    * `SFLOW_EXECUTOR_DELAY_MS` supplies the same value to a spawned Server.
    */
   executorDelayMs?: number;
+  /**
+   * Installed Node implementations. Defaults to the built-in deterministic
+   * Binder Nodes; tests and deployments can replace implementations or add
+   * Manifest versions without changing any Workflow, Run, or Result View
+   * contract.
+   */
+  registry?: NodeRegistry;
 }
 
 function executorDelayFromEnvironment(): number {
@@ -70,10 +78,12 @@ export async function createProjectServer(
   const store = new ProjectStore(projectRoot);
   const { generatedCredential } = store.initializeCredential(options.credential);
   const session = new SessionService(store.getSessionSecret());
+  const registry = options.registry ?? createBuiltinNodeRegistry();
+  const manifests = registry.list().map((implementation) => implementation.manifest);
   const executor = new LocalExecutor({
     projectRoot,
     jobsDir: join(store.sflowDir, 'executor'),
-    registry: createBuiltinNodeRegistry(),
+    registry,
     executionDelayMs: options.executorDelayMs ?? executorDelayFromEnvironment(),
   });
   const orchestrator = new Orchestrator({ store, executor });
@@ -88,11 +98,11 @@ export async function createProjectServer(
 
   registerAuthGuard(app, session);
   registerAuthRoutes(app, store, session);
-  registerNodeRoutes(app);
+  registerNodeRoutes(app, manifests);
   registerWidgetRoutes(app);
   registerWorkspaceRoutes(app, store);
-  registerRunRoutes(app, store, orchestrator);
-  registerAgentPatchRoutes(app, store);
+  registerRunRoutes(app, store, orchestrator, manifests);
+  registerAgentPatchRoutes(app, store, manifests);
   registerTerminalRoute(app, store);
   registerPages(app, session, webDist);
 

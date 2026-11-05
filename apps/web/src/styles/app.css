@@ -263,6 +263,12 @@ button {
   color: var(--color-semantic-warning);
 }
 
+.badge-destructive {
+  background: var(--color-status-destructive-bg);
+  border-color: var(--color-status-destructive-bg);
+  color: var(--color-semantic-destructive);
+}
+
 .badge-neutral {
   background: var(--color-surface-gray-50);
   border-color: var(--color-border);
@@ -731,6 +737,29 @@ button {
   font-size: var(--font-size-4);
   font-weight: 600;
   margin-bottom: var(--space-1);
+}
+
+/* Progress */
+
+.progress {
+  height: 5px;
+  margin: var(--space-2) 0;
+  border-radius: var(--radius-xs);
+  background: var(--color-brand-primary-bg);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: var(--radius-xs);
+  background: var(--color-brand-primary);
+  transition: width 160ms ease;
+}
+
+.progress-value {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-1);
+  margin: 0 0 var(--space-1);
 }
 
 /* Agent */
@@ -1220,6 +1249,17 @@ button {
   outline: none;
   border-color: var(--color-brand-primary);
   box-shadow: 0 0 0 2px var(--color-ring);
+}
+
+.input[aria-invalid="true"],
+.textarea[aria-invalid="true"] {
+  border-color: var(--color-semantic-destructive);
+}
+
+.input[aria-invalid="true"]:focus,
+.textarea[aria-invalid="true"]:focus {
+  border-color: var(--color-semantic-destructive);
+  box-shadow: 0 0 0 2px var(--color-destructive-ring);
 }
 
 .error-text {
@@ -2328,7 +2368,7 @@ button {
   align-items: stretch;
   justify-content: center;
   padding: var(--space-4);
-  background: rgb(15 23 42 / 35%);
+  background: var(--color-overlay);
 }
 
 .result-view-surface {

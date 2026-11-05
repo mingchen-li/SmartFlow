@@ -32,9 +32,16 @@ export interface CreateProjectServerOptions {
    */
   executorDelayMs?: number;
   /**
-   * Replaces the implementation of one or more built-in Manifests by
-   * `id@version`. External tests inject deterministic failures this way; the
-   * Manifest catalog and Run snapshots still use the declared Node contracts.
+   * Installed Node registry. Defaults to the built-in deterministic Binder
+   * Nodes; tests and deployments can replace implementations or add Manifest
+   * versions without changing any Workflow, Run, or Result View contract.
+   */
+  registry?: NodeRegistry;
+  /**
+   * Replaces the implementation of one or more Manifests by `id@version` in
+   * the installed registry. External tests inject deterministic failures this
+   * way; the Manifest catalog and Run snapshots still use the declared Node
+   * contracts.
    */
   nodeImplementations?: readonly NodeImplementation[];
   /**
@@ -48,11 +55,11 @@ function registryKey(manifest: { id: string; version: string }): string {
   return `${manifest.id}@${manifest.version}`;
 }
 
-/** Built-in Node registry with optional deterministic test overrides. */
-function createNodeRegistry(
+/** Installed registry with optional per-Manifest test overrides. */
+function withNodeImplementations(
+  base: NodeRegistry,
   overrides: readonly NodeImplementation[] = [],
 ): NodeRegistry {
-  const base = createBuiltinNodeRegistry();
   if (overrides.length === 0) return base;
 
   const overridesByKey = new Map(
@@ -117,7 +124,11 @@ export async function createProjectServer(
   const store = new ProjectStore(projectRoot);
   const { generatedCredential } = store.initializeCredential(options.credential);
   const session = new SessionService(store.getSessionSecret());
-  const registry = createNodeRegistry(options.nodeImplementations);
+  const registry = withNodeImplementations(
+    options.registry ?? createBuiltinNodeRegistry(),
+    options.nodeImplementations,
+  );
+  const manifests = registry.list().map((implementation) => implementation.manifest);
   const executor = new LocalExecutor({
     projectRoot,
     jobsDir: join(store.sflowDir, 'executor'),
@@ -140,11 +151,11 @@ export async function createProjectServer(
 
   registerAuthGuard(app, session);
   registerAuthRoutes(app, store, session);
-  registerNodeRoutes(app, registry);
+  registerNodeRoutes(app, manifests);
   registerWidgetRoutes(app);
   registerWorkspaceRoutes(app, store);
-  registerRunRoutes(app, store, orchestrator, registry);
-  registerAgentPatchRoutes(app, store);
+  registerRunRoutes(app, store, orchestrator, manifests);
+  registerAgentPatchRoutes(app, store, manifests);
   registerTerminalRoute(app, store);
   registerPages(app, session, webDist);
 

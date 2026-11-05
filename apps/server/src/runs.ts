@@ -15,15 +15,16 @@ import {
   validateResultViewBindings,
   validateWorkflow,
   type CancelRunResponse,
-  type NodeRegistry,
   type RerunTaskResponse,
   type ResultViewIR,
+  type NodeManifest,
   type ResultViewResponse,
   type Run,
   type RunDetailResponse,
   type RunEventsResponse,
   type TaskLogsResponse,
 } from '@sflow/domain';
+import { builtinManifests } from '@sflow/nodes';
 import { OrchestratorError, type Orchestrator } from '@sflow/orchestrator';
 import { HttpError, parseOrThrow } from './errors';
 import type { ProjectStore } from './store';
@@ -59,10 +60,8 @@ export function registerRunRoutes(
   app: FastifyInstance,
   store: ProjectStore,
   orchestrator: Orchestrator,
-  registry: NodeRegistry,
+  manifests: readonly NodeManifest[] = builtinManifests,
 ): void {
-  const manifests = registry.list().map((implementation) => implementation.manifest);
-
   app.post('/api/workflows/:id/validate', async (request) => {
     const { id } = parseOrThrow(WorkflowParamsSchema, request.params);
     const draft = store.getDraft(id);

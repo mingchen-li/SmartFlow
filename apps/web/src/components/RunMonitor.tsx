@@ -52,7 +52,7 @@ export interface RunMonitorProps {
 
 function statusTone(status: string | null | undefined): string {
   if (status === 'completed') return 'badge-success';
-  if (status === 'failed') return 'badge-warning';
+  if (status === 'failed') return 'badge-destructive';
   if (status === 'queued' || status === 'running') return 'badge-info';
   return 'badge-neutral';
 }
@@ -144,6 +144,8 @@ export function RunMonitor({
   const snapshotNodes = effectiveRun?.snapshot.nodes ?? [];
   const counts = countTasks(tasks);
   const taskLogs = useTaskLogs(effectiveRun?.id ?? null, detail?.tasks);
+  const completedPercent =
+    tasks.length === 0 ? 0 : Math.round((counts.completed / tasks.length) * 100);
 
   const nodeOrder = new Map(
     snapshotNodes.map((node, index) => [node.nodeId, index]),
@@ -242,6 +244,25 @@ export function RunMonitor({
                 <div className="card-value" data-testid="monitor-progress">
                   {counts.completed} / {tasks.length}
                 </div>
+                <div
+                  className="progress"
+                  role="progressbar"
+                  aria-label="Completed Tasks"
+                  aria-valuemin={0}
+                  aria-valuemax={Math.max(tasks.length, 1)}
+                  aria-valuenow={counts.completed}
+                  aria-valuetext={`${counts.completed} of ${tasks.length} Tasks completed`}
+                  data-testid="monitor-progress-bar"
+                >
+                  <div
+                    className="progress-fill"
+                    data-testid="monitor-progress-fill"
+                    style={{ width: `${completedPercent}%` }}
+                  />
+                </div>
+                <p className="progress-value" data-testid="monitor-progress-percent">
+                  {completedPercent}% complete
+                </p>
                 <div className="muted">
                   {counts.running} running · {counts.queued} queued · {counts.failed} failed
                 </div>

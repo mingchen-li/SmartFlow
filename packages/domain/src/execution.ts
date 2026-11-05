@@ -244,6 +244,12 @@ export const RerunTaskResponseSchema = z.strictObject({
 });
 export type RerunTaskResponse = z.infer<typeof RerunTaskResponseSchema>;
 
+export const RunArtifactParamsSchema = z.object({
+  id: z.string().min(1).max(200),
+  artifactId: z.string().min(1).max(200),
+});
+export type RunArtifactParams = z.infer<typeof RunArtifactParamsSchema>;
+
 export const TaskLogsResponseSchema = z.strictObject({
   runId: z.string().min(1),
   taskId: z.string().min(1),

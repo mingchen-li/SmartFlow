@@ -19,7 +19,11 @@ import {
 } from '@sflow/domain';
 import { nextNodeId } from '../editor/model';
 import { useEditorStore } from '../store/editor';
-import { WorkflowNodeCard, type SFlowCanvasNode } from './WorkflowNodeCard';
+import {
+  WorkflowNodeCard,
+  type CanvasRuntimeState,
+  type SFlowCanvasNode,
+} from './WorkflowNodeCard';
 
 const NODE_TYPES = { sflow: WorkflowNodeCard };
 
@@ -71,9 +75,11 @@ function candidateFor(
 export interface WorkflowCanvasProps {
   manifests: readonly NodeManifest[];
   onNotify: (message: string) => void;
+  /** Read-only active Run/Task state overlay; never persisted. */
+  runtime?: CanvasRuntimeState | null;
 }
 
-function WorkflowCanvasViewport({ manifests, onNotify }: WorkflowCanvasProps) {
+function WorkflowCanvasViewport({ manifests, onNotify, runtime }: WorkflowCanvasProps) {
   const hydrated = useEditorStore((state) => state.hydrated);
   const workflow = useEditorStore((state) => state.workflow);
   const layout = useEditorStore((state) => state.layout);
@@ -95,6 +101,11 @@ function WorkflowCanvasViewport({ manifests, onNotify }: WorkflowCanvasProps) {
     Record<string, { width: number; height: number }>
   >({});
 
+  const runtimeByNode = useMemo(
+    () => new Map((runtime?.tasks ?? []).map((task) => [task.nodeId, task])),
+    [runtime],
+  );
+
   const nodes = useMemo<SFlowCanvasNode[]>(
     () =>
       workflow.nodes.map((instance) => {
@@ -104,6 +115,7 @@ function WorkflowCanvasViewport({ manifests, onNotify }: WorkflowCanvasProps) {
         const position = layout.positions[instance.id] ?? { x: 0, y: 0 };
         const selected = layout.selection.nodeId === instance.id;
         const dimensions = measured[instance.id];
+        const runtimeState = runtimeByNode.get(instance.id);
 
         return {
           id: instance.id,
@@ -111,10 +123,23 @@ function WorkflowCanvasViewport({ manifests, onNotify }: WorkflowCanvasProps) {
           position,
           selected,
           ...(dimensions ? { measured: dimensions } : {}),
-          data: { instance, manifest, selected, flowPosition: position },
+          data: {
+            instance,
+            manifest,
+            selected,
+            flowPosition: position,
+            ...(runtimeState ? { runtime: runtimeState } : {}),
+          },
         };
       }),
-    [layout.positions, layout.selection.nodeId, manifests, measured, workflow.nodes],
+    [
+      layout.positions,
+      layout.selection.nodeId,
+      manifests,
+      measured,
+      runtimeByNode,
+      workflow.nodes,
+    ],
   );
 
   const edges = useMemo<Edge[]>(

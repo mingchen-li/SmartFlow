@@ -17,6 +17,7 @@ import { registerRunRoutes } from './runs';
 import { SessionService } from './session';
 import { ProjectStore } from './store';
 import { registerTerminalRoute } from './terminal';
+import { registerWidgetRoutes } from './widgets';
 import { registerWorkspaceRoutes } from './workspace';
 
 export interface CreateProjectServerOptions {
@@ -140,6 +141,7 @@ export async function createProjectServer(
   registerAuthGuard(app, session);
   registerAuthRoutes(app, store, session);
   registerNodeRoutes(app, registry);
+  registerWidgetRoutes(app);
   registerWorkspaceRoutes(app, store);
   registerRunRoutes(app, store, orchestrator, registry);
   registerAgentPatchRoutes(app, store);

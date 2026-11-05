@@ -17,6 +17,7 @@ export interface BootTestServerOptions {
   generateCredential?: boolean;
   projectRoot?: string;
   webDist?: string;
+  executorDelayMs?: number;
 }
 
 /**
@@ -30,6 +31,7 @@ export async function bootTestServer(options: BootTestServerOptions = {}): Promi
     projectRoot,
     credential: options.generateCredential ? undefined : credential,
     webDist: options.webDist,
+    executorDelayMs: options.executorDelayMs,
   });
   const { url } = await server.listen(0, '127.0.0.1');
 

@@ -22,6 +22,19 @@ export interface CreateProjectServerOptions {
   credential?: string;
   webDist?: string;
   logger?: boolean;
+  /**
+   * Deterministic pause before each local Node execution. Integration tests
+   * use it to restart the Server during an active Run; production leaves it 0.
+   * `SFLOW_EXECUTOR_DELAY_MS` supplies the same value to a spawned Server.
+   */
+  executorDelayMs?: number;
+}
+
+function executorDelayFromEnvironment(): number {
+  const raw = process.env.SFLOW_EXECUTOR_DELAY_MS;
+  if (!raw) return 0;
+  const milliseconds = Number(raw);
+  return Number.isFinite(milliseconds) && milliseconds > 0 ? milliseconds : 0;
 }
 
 export interface ListenResult {
@@ -59,6 +72,7 @@ export async function createProjectServer(
     projectRoot,
     jobsDir: join(store.sflowDir, 'executor'),
     registry: createBuiltinNodeRegistry(),
+    executionDelayMs: options.executorDelayMs ?? executorDelayFromEnvironment(),
   });
   const orchestrator = new Orchestrator({ store, executor });
   const app = Fastify({ logger: options.logger ?? false });
@@ -88,10 +102,14 @@ export async function createProjectServer(
   }
 
   app.addHook('onClose', async () => {
-    // Stop active Runs before closing the store they persist through.
+    // Stop monitoring before closing the store. Active Run/Task/executor state
+    // stays persisted so the next Server process can reconcile and resume it.
     await orchestrator.close();
     store.close();
   });
+
+  // Rebuild any Runs that were active when the previous process stopped.
+  await orchestrator.reconcileAll();
 
   return {
     app,

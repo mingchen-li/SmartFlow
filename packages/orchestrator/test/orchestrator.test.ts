@@ -9,6 +9,7 @@ import {
   type Artifact,
   type Metric,
   type NodeManifest,
+  type NodeRegistry,
   type Run,
   type RunEvent,
   type RunFileReference,
@@ -68,6 +69,12 @@ class MemoryOrchestratorStore implements OrchestratorStore {
 
   getRun(runId: string): Run | undefined {
     return this.runs.get(runId);
+  }
+
+  listActiveRuns(): Run[] {
+    return [...this.runs.values()].filter(
+      (run) => run.status === 'queued' || run.status === 'running',
+    );
   }
 
   updateRunStatus(runId: string, status: RunStatus): void {
@@ -132,6 +139,18 @@ class MemoryOrchestratorStore implements OrchestratorStore {
 
   getTaskOutputs(taskId: string): TaskOutputRecord[] | undefined {
     return this.outputs.get(taskId);
+  }
+
+  findArtifact(taskId: string, name: string): Artifact | undefined {
+    return this.artifacts.find(
+      (artifact) => artifact.taskId === taskId && artifact.name === name,
+    );
+  }
+
+  findMetric(taskId: string, metricId: string): Metric | undefined {
+    return this.metrics.find(
+      (metric) => metric.taskId === taskId && metric.metricId === metricId,
+    );
   }
 
   recordArtifact(input: NewArtifactRecord): Artifact {
@@ -359,6 +378,58 @@ function makeOrchestrator(fixture: Fixture, store: MemoryOrchestratorStore): Orc
   return new Orchestrator({ store, executor, pollIntervalMs: 2 });
 }
 
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs = 5_000,
+  description = 'the expected condition',
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${description}.`);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+}
+
+/**
+ * Wraps the built-in registry so the first attempt of one Node waits until its
+ * execution signal aborts. This models a Compute Executor job that was already
+ * running when the previous Server process stopped monitoring it.
+ */
+function interruptedRegistry(manifestId: string): {
+  registry: NodeRegistry;
+  waitForJob: () => Promise<void>;
+} {
+  const base = createBuiltinNodeRegistry();
+  let started: (() => void) | undefined;
+  const jobStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+
+  return {
+    waitForJob: () => jobStarted,
+    registry: {
+      get(id, version) {
+        const implementation = base.get(id, version);
+        if (!implementation || id !== manifestId) return implementation;
+        return {
+          manifest: implementation.manifest,
+          run(input, parameters, context) {
+            if (context.attempt > 1) {
+              return implementation.run(input, parameters, context);
+            }
+            started?.();
+            return new Promise<void>((resolve) => {
+              if (context.signal.aborted) resolve();
+              else context.signal.addEventListener('abort', () => resolve(), { once: true });
+            }).then(() => ({ outputs: [], metrics: {} }));
+          },
+        };
+      },
+      list: () => base.list(),
+    },
+  };
+}
+
 describe('Orchestrator dependency scheduling and persisted execution', () => {
   it('schedules one Task per atomic Node in dependency order and completes the Run', async () => {
     const fixture = binderFixture();
@@ -555,5 +626,360 @@ describe('Orchestrator dependency scheduling and persisted execution', () => {
     await orchestrator.whenIdle(run.id);
     expect(store.getRun(run.id)?.status).toBe('completed');
     expect(store.listTasks(run.id).every((task) => task.state === 'completed')).toBe(true);
+  });
+});
+
+/**
+ * Wraps the built-in registry so the first attempt of one Node waits for an
+ * explicit release, modelling executor work that keeps running while the
+ * Server process is not monitoring it.
+ */
+function gatedRegistry(manifestId: string): {
+  registry: NodeRegistry;
+  waitForJob: () => Promise<void>;
+  release: () => void;
+} {
+  const base = createBuiltinNodeRegistry();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let started!: () => void;
+  const jobStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+
+  return {
+    waitForJob: () => jobStarted,
+    release: () => release(),
+    registry: {
+      get(id, version) {
+        const implementation = base.get(id, version);
+        if (!implementation || id !== manifestId) return implementation;
+        return {
+          manifest: implementation.manifest,
+          run(input, parameters, context) {
+            started();
+            return gate.then(() => implementation.run(input, parameters, context));
+          },
+        };
+      },
+      list: () => base.list(),
+    },
+  };
+}
+
+describe('Orchestrator restart reconciliation', () => {
+  it('resumes an active Run and requeues an interrupted Task attempt without duplicating completed work', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(fixture.snapshot);
+    store.seedRun(run);
+
+    const jobsDir = join(fixture.projectRoot, '.sflow', 'executor');
+    const interrupted = interruptedRegistry('candidate-generation');
+    const firstExecutor = new LocalExecutor({
+      projectRoot: fixture.projectRoot,
+      jobsDir,
+      registry: interrupted.registry,
+    });
+    const first = new Orchestrator({ store, executor: firstExecutor, pollIntervalMs: 2 });
+
+    first.start(run.id);
+    await interrupted.waitForJob();
+    await waitUntil(
+      () => store.getTask(
+        store.listTasks(run.id).find((task) => task.nodeId === NODE_IDS.target)!.id,
+      )?.state === 'completed',
+      5_000,
+      'the target Task to complete',
+    );
+    await waitUntil(
+      () => store.listTasks(run.id).some(
+        (task) => task.nodeId === NODE_IDS.generator && task.state === 'running',
+      ),
+      5_000,
+      'the generator Task to start',
+    );
+
+    const beforeRestart = store.listTasks(run.id);
+    const targetTask = beforeRestart.find((task) => task.nodeId === NODE_IDS.target)!;
+    const generatorTask = beforeRestart.find((task) => task.nodeId === NODE_IDS.generator)!;
+    const targetArtifactIds = store.artifacts
+      .filter((artifact) => artifact.taskId === targetTask.id)
+      .map((artifact) => artifact.id)
+      .sort();
+    expect(targetArtifactIds.length).toBeGreaterThan(0);
+    expect(generatorTask.jobId).toBeTruthy();
+
+    // The Server stops monitoring but must leave the active Run, Task, and
+    // executor job records for the next process to reconcile.
+    await first.close();
+    expect(store.getRun(run.id)?.status).toBe('running');
+    expect(store.getTask(generatorTask.id)?.state).toBe('running');
+    const persistedJobs = await firstExecutor.reconcile(run.id);
+    expect(
+      persistedJobs.jobs.find((job) => job.jobId === generatorTask.jobId)?.state,
+    ).toBe('running');
+
+    // A fresh Server process reconstructs state from the same Project.
+    const secondExecutor = new LocalExecutor({
+      projectRoot: fixture.projectRoot,
+      jobsDir,
+      registry: createBuiltinNodeRegistry(),
+    });
+    const second = new Orchestrator({ store, executor: secondExecutor, pollIntervalMs: 2 });
+    await second.reconcileAll();
+    await second.whenIdle(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('completed');
+
+    const tasks = store.listTasks(run.id);
+    // Completed work is never duplicated or re-executed.
+    expect(store.getTask(targetTask.id)).toMatchObject({
+      state: 'completed',
+      attempt: 1,
+    });
+    expect(
+      store.artifacts
+        .filter((artifact) => artifact.taskId === targetTask.id)
+        .map((artifact) => artifact.id)
+        .sort(),
+    ).toEqual(targetArtifactIds);
+
+    // The interrupted attempt keeps its history; the resumed work is a new
+    // attempt, so exactly one Task attempt per Node completes.
+    const interruptedAttempt = tasks.find(
+      (task) => task.nodeId === NODE_IDS.generator && task.attempt === 1,
+    )!;
+    expect(interruptedAttempt.state).toBe('failed');
+    expect(interruptedAttempt.error).toMatch(/restarted while this Task attempt was running/i);
+    expect(interruptedAttempt.logsAvailable).toBe(true);
+
+    const resumedAttempt = tasks.find(
+      (task) => task.nodeId === NODE_IDS.generator && task.attempt === 2,
+    )!;
+    expect(resumedAttempt.state).toBe('completed');
+    expect(resumedAttempt.exitCode).toBe(0);
+
+    for (const nodeId of [
+      NODE_IDS.target,
+      NODE_IDS.generator,
+      NODE_IDS.designer,
+      NODE_IDS.predictor,
+      NODE_IDS.comparison,
+    ]) {
+      expect(
+        tasks.filter((task) => task.nodeId === nodeId && task.state === 'completed'),
+      ).toHaveLength(1);
+    }
+
+    expect(store.artifacts).toHaveLength(12);
+    const runStarted = store.events.filter((event) => event.type === 'run.started');
+    expect(runStarted).toHaveLength(1);
+    expect(store.events.filter((event) => event.type === 'run.completed')).toHaveLength(1);
+    expect(
+      store.events.filter(
+        (event) => event.taskId === interruptedAttempt.id && event.type === 'task.failed',
+      ),
+    ).toHaveLength(1);
+
+    // Let the abandoned executor job settle before the fixture is removed.
+    await firstExecutor.cancel(generatorTask.jobId!);
+  });
+
+  it('adopts executor results that completed while the Server was down without re-submitting them', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(fixture.snapshot);
+    store.seedRun(run);
+
+    const jobsDir = join(fixture.projectRoot, '.sflow', 'executor');
+    const gated = gatedRegistry('candidate-generation');
+    const firstExecutor = new LocalExecutor({
+      projectRoot: fixture.projectRoot,
+      jobsDir,
+      registry: gated.registry,
+    });
+    const first = new Orchestrator({ store, executor: firstExecutor, pollIntervalMs: 2 });
+
+    first.start(run.id);
+    await gated.waitForJob();
+    await waitUntil(
+      () => store.listTasks(run.id).some(
+        (task) => task.nodeId === NODE_IDS.generator && task.state === 'running',
+      ),
+      5_000,
+      'the generator Task to start',
+    );
+
+    const generatorTask = store
+      .listTasks(run.id)
+      .find((task) => task.nodeId === NODE_IDS.generator)!;
+
+    // The Server stops monitoring, then the executor job finishes on its own.
+    await first.close();
+    gated.release();
+    let persistedJobState: string | undefined;
+    const deadline = Date.now() + 5_000;
+    while (persistedJobState !== 'completed' && Date.now() < deadline) {
+      const jobs = (await firstExecutor.reconcile(run.id)).jobs;
+      persistedJobState = jobs.find((job) => job.taskId === generatorTask.id)?.state;
+      if (persistedJobState !== 'completed') {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    }
+    expect(persistedJobState).toBe('completed');
+
+    // A fresh Server process adopts the completed executor result.
+    const secondExecutor = new LocalExecutor({
+      projectRoot: fixture.projectRoot,
+      jobsDir,
+      registry: createBuiltinNodeRegistry(),
+    });
+    const second = new Orchestrator({ store, executor: secondExecutor, pollIntervalMs: 2 });
+    await second.reconcileAll();
+    await second.whenIdle(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('completed');
+    const tasks = store.listTasks(run.id);
+    expect(tasks).toHaveLength(5);
+    expect(tasks.every((task) => task.attempt === 1 && task.state === 'completed')).toBe(true);
+
+    const generatorAfter = tasks.find((task) => task.nodeId === NODE_IDS.generator)!;
+    expect(generatorAfter.id).toBe(generatorTask.id);
+    expect(generatorAfter.jobId).toBe(generatorTask.jobId);
+
+    // No second executor job was submitted for the adopted attempt.
+    expect((await secondExecutor.reconcile(run.id)).jobs).toHaveLength(5);
+    expect(store.artifacts).toHaveLength(12);
+    expect(store.events.filter((event) => event.type === 'task.failed')).toEqual([]);
+  });
+
+  it('does not interrupt work this process is already monitoring when reconciled repeatedly', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(fixture.snapshot);
+    store.seedRun(run);
+
+    const gated = gatedRegistry('candidate-generation');
+    const executor = new LocalExecutor({
+      projectRoot: fixture.projectRoot,
+      jobsDir: join(fixture.projectRoot, '.sflow', 'executor'),
+      registry: gated.registry,
+    });
+    const orchestrator = new Orchestrator({ store, executor, pollIntervalMs: 2 });
+
+    orchestrator.start(run.id);
+    await gated.waitForJob();
+    await waitUntil(
+      () => store.listTasks(run.id).some(
+        (task) => task.nodeId === NODE_IDS.generator && task.state === 'running',
+      ),
+      5_000,
+      'the generator Task to start',
+    );
+
+    await orchestrator.reconcileAll();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const generatorTasks = store
+      .listTasks(run.id)
+      .filter((task) => task.nodeId === NODE_IDS.generator);
+    expect(generatorTasks).toHaveLength(1);
+    expect(generatorTasks[0]).toMatchObject({ attempt: 1, state: 'running' });
+
+    gated.release();
+    await orchestrator.whenIdle(run.id);
+    expect(store.getRun(run.id)?.status).toBe('completed');
+    expect(store.listTasks(run.id)).toHaveLength(5);
+    expect(
+      store.listTasks(run.id).every((task) => task.attempt === 1 && task.state === 'completed'),
+    ).toBe(true);
+
+    // Further startups against a terminal Run are no-ops.
+    const eventsBefore = store.events.length;
+    const tasksBefore = store.listTasks(run.id).map((task) => task.id);
+    await orchestrator.reconcileAll();
+    expect(store.events).toHaveLength(eventsBefore);
+    expect(store.listTasks(run.id).map((task) => task.id)).toEqual(tasksBefore);
+  });
+
+  it('re-adopting a partially recorded Task result does not rewrite scientific records', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(fixture.snapshot);
+    store.seedRun(run);
+    await makeOrchestrator(fixture, store).run(run.id);
+
+    const comparisonTask = store
+      .listTasks(run.id)
+      .find((task) => task.nodeId === NODE_IDS.comparison)!;
+    const metricsBefore = store.metrics.filter(
+      (metric) => metric.taskId === comparisonTask.id,
+    );
+    const artifactsBefore = store.artifacts.filter(
+      (artifact) => artifact.taskId === comparisonTask.id,
+    );
+    const recordedEventsBefore = store.events.filter(
+      (event) =>
+        event.taskId === comparisonTask.id &&
+        (event.type === 'artifact.recorded' || event.type === 'metric.recorded'),
+    );
+    expect(metricsBefore.length).toBeGreaterThan(0);
+    expect(artifactsBefore.length).toBeGreaterThan(0);
+
+    // Simulate a crash after the executor job finished and some scientific
+    // records were written, but before the Task completion was persisted.
+    store.updateTask(comparisonTask.id, { state: 'running' });
+    store.updateRunStatus(run.id, 'running');
+
+    const restarted = makeOrchestrator(fixture, store);
+    await restarted.reconcileAll();
+    await restarted.whenIdle(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('completed');
+    expect(
+      store.metrics.filter((metric) => metric.taskId === comparisonTask.id),
+    ).toHaveLength(metricsBefore.length);
+    expect(
+      store.artifacts.filter((artifact) => artifact.taskId === comparisonTask.id),
+    ).toHaveLength(artifactsBefore.length);
+    expect(
+      store.events.filter(
+        (event) =>
+          event.taskId === comparisonTask.id &&
+          (event.type === 'artifact.recorded' || event.type === 'metric.recorded'),
+      ),
+    ).toHaveLength(recordedEventsBefore.length);
+    expect(store.listTasks(run.id).every((task) => task.state === 'completed')).toBe(true);
+  });
+
+  it('completes an active Run whose Tasks all finished before the Run status was persisted', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(fixture.snapshot);
+    store.seedRun(run);
+    await makeOrchestrator(fixture, store).run(run.id);
+
+    // Simulate a crash between the last Task completion and the Run completion.
+    const completedEvent = store.events.pop()!;
+    expect(completedEvent.type).toBe('run.completed');
+    store.updateRunStatus(run.id, 'running');
+    const taskIds = store.listTasks(run.id).map((task) => task.id);
+    const artifactCount = store.artifacts.length;
+
+    const restarted = makeOrchestrator(fixture, store);
+    await restarted.reconcileAll();
+    await restarted.whenIdle(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('completed');
+    expect(store.listTasks(run.id).map((task) => task.id)).toEqual(taskIds);
+    expect(store.artifacts).toHaveLength(artifactCount);
+    expect(store.events.at(-1)?.type).toBe('run.completed');
+
+    const eventsAfterFirst = store.events.length;
+    await restarted.reconcileAll();
+    expect(store.events).toHaveLength(eventsAfterFirst);
   });
 });

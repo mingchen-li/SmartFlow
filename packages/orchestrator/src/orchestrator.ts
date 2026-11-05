@@ -14,6 +14,7 @@ import type {
   ExecutorTaskResult,
   OrchestratorStore,
   PollResult,
+  ReconcileJob,
   TaskOutputRecord,
   TaskSpec,
 } from './contracts';
@@ -36,6 +37,15 @@ export interface PlannedNode {
 }
 
 const TERMINAL_STATES = new Set<TaskState>(TASK_TERMINAL_STATES);
+const TERMINAL_RUN_STATES = new Set<Run['status']>(['completed', 'failed', 'canceled']);
+
+/**
+ * A Task attempt that was still queued or running when the Server process
+ * stopped is failed with this message; resuming work creates a new attempt, so
+ * completed scientific records are never rewritten or executed twice.
+ */
+const INTERRUPTED_MESSAGE = 'The Server restarted while this Task attempt was running.';
+const INTERRUPTED_EXIT_CODE = 137;
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -114,6 +124,7 @@ export class Orchestrator {
   private readonly clock: () => Date;
   private readonly active = new Map<string, Promise<void>>();
   private readonly controllers = new Map<string, AbortController>();
+  private closing = false;
 
   constructor(options: OrchestratorOptions) {
     this.store = options.store;
@@ -122,9 +133,22 @@ export class Orchestrator {
     this.clock = options.clock ?? (() => new Date());
   }
 
+  /**
+   * Rebuilds active Run state from persisted Project and executor records, then
+   * resumes execution. Called by the Server on startup. Safe to call on
+   * repeated startups: terminal Runs and completed Tasks are left untouched.
+   */
+  async reconcileAll(): Promise<void> {
+    if (this.closing) return;
+    for (const run of this.store.listActiveRuns()) {
+      if (this.closing) return;
+      await this.reconcileRun(run.id);
+    }
+  }
+
   /** Starts a Run in the background. Safe to call more than once per Run. */
   start(runId: string): void {
-    if (this.active.has(runId)) return;
+    if (this.closing || this.active.has(runId)) return;
     const controller = new AbortController();
     this.controllers.set(runId, controller);
     const promise = this.run(runId, { signal: controller.signal }).catch(() => undefined);
@@ -140,8 +164,13 @@ export class Orchestrator {
     await this.active.get(runId);
   }
 
-  /** Aborts active Run execution, e.g. when the Project Server closes. */
+  /**
+   * Stops monitoring active Runs when the Project Server closes. Persisted Run,
+   * Task, and executor job state is deliberately left non-terminal so the next
+   * Server process can reconcile and resume it; executor work is not canceled.
+   */
   async close(): Promise<void> {
+    this.closing = true;
     for (const controller of this.controllers.values()) controller.abort();
     await Promise.allSettled([...this.active.values()]);
   }
@@ -154,33 +183,208 @@ export class Orchestrator {
     try {
       await this.executeRun(runId, options.signal);
     } catch (error) {
+      if (this.closing) return;
       this.markRunFailed(runId, errorMessage(error));
       throw error;
     }
   }
 
+  private async reconcileRun(runId: string): Promise<void> {
+    // Repeated startups (or a second reconcile call) must not interrupt work
+    // this process is already monitoring.
+    if (this.active.has(runId)) return;
+    const run = this.store.getRun(runId);
+    if (!run || TERMINAL_RUN_STATES.has(run.status)) return;
+
+    const plan = planRun(run.snapshot);
+    const tasks = this.ensureTasks(run, plan);
+    const jobs = (await this.executor.reconcile(run.id)).jobs;
+    const outputsByNode = new Map<string, TaskOutputRecord[]>();
+    for (const task of tasks.values()) {
+      if (task.state !== 'completed') continue;
+      const outputs = this.store.getTaskOutputs(task.id);
+      if (outputs) outputsByNode.set(task.nodeId, outputs);
+    }
+
+    for (const planned of plan) {
+      if (this.closing) return;
+      const task = tasks.get(planned.node.nodeId)!;
+      if (task.state === 'completed') continue;
+      if (task.state === 'failed') {
+        this.markRunFailed(run.id, task.error ?? 'The Task failed.', task.id);
+        return;
+      }
+      if (task.state === 'canceled') {
+        this.markRunCanceled(run.id, task.id);
+        return;
+      }
+
+      const job = this.findExecutorJob(task, jobs);
+      if (job && TERMINAL_STATES.has(job.state)) {
+        if (job.state === 'completed') {
+          const adopted = await this.adoptCompletedJob(
+            run,
+            task,
+            planned,
+            job.jobId,
+            outputsByNode,
+          );
+          if (!adopted) return;
+          tasks.set(planned.node.nodeId, this.store.getTask(task.id)!);
+          continue;
+        }
+        if (job.state === 'failed') {
+          this.failTask(
+            run,
+            task,
+            job.error ?? 'The Node execution failed.',
+            job.jobId,
+            job.exitCode ?? 1,
+          );
+          return;
+        }
+        const completedAt = this.now();
+        this.store.updateTask(task.id, {
+          state: 'canceled',
+          exitCode: job.exitCode ?? 130,
+          completedAt,
+        });
+        this.store.appendEvent({
+          runId: run.id,
+          taskId: task.id,
+          type: 'task.canceled',
+          payload: { exitCode: job.exitCode ?? 130 },
+          createdAt: completedAt,
+        });
+        this.markRunCanceled(run.id, task.id);
+        return;
+      }
+
+      // A queued Task with no executor job never started before shutdown.
+      if (task.state === 'queued' && !job) continue;
+      tasks.set(planned.node.nodeId, this.interruptTask(run, planned.node, task));
+    }
+
+    if ([...tasks.values()].every((task) => task.state === 'completed')) {
+      this.completeRun(run.id, plan.length);
+      return;
+    }
+
+    this.start(run.id);
+  }
+
+  /** Finds the persisted executor record for the Task attempt, if any. */
+  private findExecutorJob(task: Task, jobs: ReconcileJob[]): ReconcileJob | undefined {
+    if (task.jobId) {
+      const byId = jobs.find((job) => job.jobId === task.jobId);
+      if (byId) return byId;
+    }
+    return jobs
+      .filter((job) => job.taskId === task.id && job.attempt === task.attempt)
+      .sort((left, right) => right.jobId.localeCompare(left.jobId))[0];
+  }
+
+  /**
+   * Closes an interrupted attempt as failed history and schedules a fresh
+   * attempt for the same Node. The interrupted attempt's logs and records stay
+   * visible; the resumed attempt is what reports the final scientific result.
+   */
+  private interruptTask(run: Run, node: RunNodeSnapshot, task: Task): Task {
+    const completedAt = this.now();
+    this.store.updateTask(task.id, {
+      state: 'failed',
+      exitCode: INTERRUPTED_EXIT_CODE,
+      error: INTERRUPTED_MESSAGE,
+      completedAt,
+    });
+    this.store.appendEvent({
+      runId: run.id,
+      taskId: task.id,
+      type: 'task.failed',
+      payload: {
+        nodeId: node.nodeId,
+        attempt: task.attempt,
+        exitCode: INTERRUPTED_EXIT_CODE,
+        error: INTERRUPTED_MESSAGE,
+        interrupted: true,
+      },
+      createdAt: completedAt,
+    });
+    return this.createTask(run, node, task.attempt + 1);
+  }
+
+  /**
+   * Adopts an executor job that reached a terminal completed state while the
+   * Server was not monitoring it. The persisted executor result is recorded
+   * exactly once through the same path as a live completion.
+   */
+  private async adoptCompletedJob(
+    run: Run,
+    task: Task,
+    planned: PlannedNode,
+    jobId: string,
+    outputsByNode: Map<string, TaskOutputRecord[]>,
+  ): Promise<boolean> {
+    const poll = await this.executor.poll(jobId);
+    if (poll.state !== 'completed' || !poll.result) {
+      this.failTask(
+        run,
+        task,
+        poll.error ?? `Executor job "${jobId}" completed without a Task result.`,
+        jobId,
+        poll.exitCode ?? 1,
+      );
+      return false;
+    }
+
+    const outputs = this.completeTaskFromResult(
+      run,
+      task,
+      planned,
+      jobId,
+      poll.result,
+      this.upstreamArtifactIds(planned, outputsByNode),
+    );
+    outputsByNode.set(task.nodeId, outputs);
+    return true;
+  }
+
+  private completeRun(runId: string, taskCount: number): void {
+    const run = this.store.getRun(runId);
+    if (!run || TERMINAL_RUN_STATES.has(run.status)) return;
+    this.store.updateRunStatus(runId, 'completed');
+    this.store.appendEvent({
+      runId,
+      type: 'run.completed',
+      payload: { taskCount },
+      createdAt: this.now(),
+    });
+  }
+
   private async executeRun(runId: string, signal?: AbortSignal): Promise<void> {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`Unknown Run "${runId}".`);
-    if (run.status === 'completed' || run.status === 'failed' || run.status === 'canceled') {
-      return;
-    }
+    if (TERMINAL_RUN_STATES.has(run.status)) return;
 
     const plan = planRun(run.snapshot);
     const tasks = this.ensureTasks(run, plan);
 
+    if (this.closing) return;
     if (signal?.aborted) {
       this.markRunCanceled(runId);
       return;
     }
 
+    const wasQueued = run.status === 'queued';
     this.store.updateRunStatus(runId, 'running');
-    this.store.appendEvent({
-      runId,
-      type: 'run.started',
-      payload: { nodeCount: plan.length },
-      createdAt: this.now(),
-    });
+    if (wasQueued) {
+      this.store.appendEvent({
+        runId,
+        type: 'run.started',
+        payload: { nodeCount: plan.length },
+        createdAt: this.now(),
+      });
+    }
 
     const outputsByNode = new Map<string, TaskOutputRecord[]>();
     for (const task of tasks.values()) {
@@ -193,8 +397,18 @@ export class Orchestrator {
       const task = tasks.get(planned.node.nodeId)!;
       if (task.state === 'completed') continue;
 
+      if (this.closing) return;
       if (signal?.aborted) {
         this.markRunCanceled(runId);
+        return;
+      }
+
+      if (task.state === 'failed') {
+        this.markRunFailed(runId, task.error ?? 'The Task failed.', task.id);
+        return;
+      }
+      if (task.state === 'canceled') {
+        this.markRunCanceled(runId, task.id);
         return;
       }
 
@@ -212,36 +426,33 @@ export class Orchestrator {
       outputsByNode.set(task.nodeId, outcome.outputs);
     }
 
-    this.store.updateRunStatus(runId, 'completed');
-    this.store.appendEvent({
-      runId,
-      type: 'run.completed',
-      payload: { taskCount: plan.length },
-      createdAt: this.now(),
-    });
+    this.completeRun(runId, plan.length);
   }
 
-  /** Creates the queued Task rows up front, in dependency order. */
+  /**
+   * Returns the current (highest-attempt) Task per Node, creating the initial
+   * queued rows in dependency order. Earlier attempts remain as history.
+   */
   private ensureTasks(run: Run, plan: PlannedNode[]): Map<string, Task> {
     const existing = this.store.listTasks(run.id);
     const tasks = new Map<string, Task>();
     for (const node of plan) {
-      const task =
-        existing.find((candidate) => candidate.nodeId === node.node.nodeId && candidate.attempt === 1) ??
-        this.createTask(run, node.node);
-      tasks.set(node.node.nodeId, task);
+      const latest = existing
+        .filter((candidate) => candidate.nodeId === node.node.nodeId)
+        .sort((left, right) => right.attempt - left.attempt)[0];
+      tasks.set(node.node.nodeId, latest ?? this.createTask(run, node.node, 1));
     }
     return tasks;
   }
 
-  private createTask(run: Run, node: RunNodeSnapshot): Task {
+  private createTask(run: Run, node: RunNodeSnapshot, attempt: number): Task {
     const task = this.store.createTask({
       runId: run.id,
       nodeId: node.nodeId,
       label: node.label,
       manifestId: node.manifestId,
       manifestVersion: node.manifestVersion,
-      attempt: 1,
+      attempt,
       state: 'queued',
       createdAt: this.now(),
     });
@@ -330,28 +541,38 @@ export class Orchestrator {
 
     let jobId: string;
     try {
-      const submitted = await this.executor.submit(spec, { signal });
+      // Shutdown monitoring must not cancel executor work; cancellation is an
+      // explicit executor.cancel call when a Run is canceled.
+      const submitted = await this.executor.submit(spec);
       jobId = submitted.jobId;
       this.store.updateTask(task.id, { jobId });
     } catch (error) {
+      if (this.closing) return { type: 'stopped' };
       return this.failTask(run, task, errorMessage(error));
     }
+
+    if (this.closing) return { type: 'stopped' };
 
     let poll: PollResult;
     try {
       poll = await this.executor.poll(jobId);
       let cancelRequested = false;
       while (!TERMINAL_STATES.has(poll.state)) {
+        if (this.closing) return { type: 'stopped' };
         if (signal?.aborted && !cancelRequested) {
           cancelRequested = true;
           await this.executor.cancel(jobId).catch(() => undefined);
         }
         await delay(this.pollIntervalMs);
+        if (this.closing) return { type: 'stopped' };
         poll = await this.executor.poll(jobId);
       }
     } catch (error) {
+      if (this.closing) return { type: 'stopped' };
       return this.failTask(run, task, errorMessage(error), jobId);
     }
+
+    if (this.closing) return { type: 'stopped' };
 
     if (poll.state === 'canceled') {
       const completedAt = this.now();
@@ -385,32 +606,58 @@ export class Orchestrator {
       if (!poll.result) {
         throw new Error(`Executor job "${jobId}" completed without a Task result.`);
       }
-      const outputs = this.recordTaskResult(
+      const outputs = this.completeTaskFromResult(
         run,
         task,
         planned,
         jobId,
         poll.result,
         upstreamArtifacts,
+        poll.exitCode ?? 0,
       );
-      this.store.saveTaskOutputs(task.id, outputs);
-      const completedAt = this.now();
-      this.store.updateTask(task.id, {
-        state: 'completed',
-        exitCode: poll.exitCode ?? 0,
-        completedAt,
-      });
-      this.store.appendEvent({
-        runId: run.id,
-        taskId: task.id,
-        type: 'task.completed',
-        payload: { exitCode: poll.exitCode ?? 0 },
-        createdAt: completedAt,
-      });
       return { type: 'completed', outputs };
     } catch (error) {
       return this.failTask(run, task, errorMessage(error), jobId);
     }
+  }
+
+  /**
+   * Records a completed Task result, its Artifacts and Metrics, and the
+   * completion event. Artifact records are idempotent, so adopting a persisted
+   * result after a restart is safe.
+   */
+  private completeTaskFromResult(
+    run: Run,
+    task: Task,
+    planned: PlannedNode,
+    jobId: string,
+    result: ExecutorTaskResult,
+    upstreamArtifacts: string[],
+    exitCode = 0,
+  ): TaskOutputRecord[] {
+    const outputs = this.recordTaskResult(
+      run,
+      task,
+      planned,
+      jobId,
+      result,
+      upstreamArtifacts,
+    );
+    this.store.saveTaskOutputs(task.id, outputs);
+    const completedAt = this.now();
+    this.store.updateTask(task.id, {
+      state: 'completed',
+      exitCode,
+      completedAt,
+    });
+    this.store.appendEvent({
+      runId: run.id,
+      taskId: task.id,
+      type: 'task.completed',
+      payload: { exitCode },
+      createdAt: completedAt,
+    });
+    return outputs;
   }
 
   private recordTaskResult(
@@ -445,13 +692,22 @@ export class Orchestrator {
     for (const output of result.outputs) {
       const artifactIds: string[] = [];
       for (const artifact of output.artifacts) {
+        const path = `${this.store.taskNamespacePath(run.id, task.id)}/${artifact.relativePath}`;
+        const existing = this.store.findArtifact(task.id, artifact.name);
+        if (existing) {
+          if (existing.path !== path || existing.sha256 !== artifact.sha256) {
+            throw new Error(`Artifact "${artifact.name}" is immutable.`);
+          }
+          artifactIds.push(existing.id);
+          continue;
+        }
         const recorded = this.store.recordArtifact({
           runId: run.id,
           taskId: task.id,
           nodeId: node.nodeId,
           name: artifact.name,
           mediaType: artifact.mediaType,
-          path: `${this.store.taskNamespacePath(run.id, task.id)}/${artifact.relativePath}`,
+          path,
           sha256: artifact.sha256,
           size: artifact.size,
           ...(artifact.schema ? { schema: artifact.schema } : {}),
@@ -481,6 +737,18 @@ export class Orchestrator {
     }
 
     for (const metric of result.metrics) {
+      const existing = this.store.findMetric(task.id, metric.spec.id);
+      if (existing) {
+        if (
+          existing.value !== metric.value ||
+          existing.schema.namespace !== metric.schema.namespace ||
+          existing.schema.name !== metric.schema.name ||
+          existing.schema.version !== metric.schema.version
+        ) {
+          throw new Error(`Metric "${metric.spec.id}" is immutable.`);
+        }
+        continue;
+      }
       const recorded = this.store.recordMetric({
         runId: run.id,
         taskId: task.id,

@@ -37,6 +37,11 @@ export interface LocalExecutorOptions {
   jobsDir: string;
   registry: NodeRegistry;
   clock?: () => Date;
+  /**
+   * Deterministic pause before a Node starts. Integration tests use this to
+   * observe an active Run mid-execution; it defaults to no delay.
+   */
+  executionDelayMs?: number;
 }
 
 interface PersistedJob {
@@ -90,6 +95,7 @@ export class LocalExecutor implements ComputeExecutor {
   private readonly jobsDir: string;
   private readonly registry: NodeRegistry;
   private readonly clock: () => Date;
+  private readonly executionDelayMs: number;
   private readonly jobs = new Map<string, JobHandle>();
 
   constructor(options: LocalExecutorOptions) {
@@ -97,6 +103,7 @@ export class LocalExecutor implements ComputeExecutor {
     this.jobsDir = resolve(options.jobsDir);
     this.registry = options.registry;
     this.clock = options.clock ?? (() => new Date());
+    this.executionDelayMs = Math.max(0, options.executionDelayMs ?? 0);
     mkdirSync(this.jobsDir, { recursive: true });
   }
 
@@ -209,6 +216,11 @@ export class LocalExecutor implements ComputeExecutor {
       this.updateJob(job, { state: 'running' });
       log(`node=${implementation.manifest.id} attempt=${spec.attempt}`);
       log('state=running');
+
+      if (!(await this.pause(this.executionDelayMs, signal))) {
+        this.finish(job, { state: 'canceled', exitCode: 130 }, log);
+        return;
+      }
 
       const context: NodeRunContext = {
         runId: spec.runId,
@@ -386,6 +398,25 @@ export class LocalExecutor implements ComputeExecutor {
   private updateJob(job: PersistedJob, patch: Partial<PersistedJob>): void {
     Object.assign(job, patch, { updatedAt: this.clock().toISOString() });
     this.persist(job);
+  }
+
+  /** Abortable pause; resolves false when the signal aborts before the delay ends. */
+  private pause(milliseconds: number, signal: AbortSignal): Promise<boolean> {
+    if (milliseconds <= 0) return Promise.resolve(!signal.aborted);
+    if (signal.aborted) return Promise.resolve(false);
+
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        resolve(false);
+      };
+      timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(true);
+      }, milliseconds);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   private appendLog(path: string, line: string): void {

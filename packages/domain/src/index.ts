@@ -152,6 +152,7 @@ export * from './scientific';
 export * from './execution';
 export * from './node-run';
 export * from './result-view';
+export * from './slurm-task-input';
 
 /**
  * `WS /api/terminal` protocol.

@@ -248,12 +248,14 @@ describe('Result View API', () => {
     expect(response.status).toBe(200);
     const body = await readJson<{
       resultView: unknown;
+      revision: number;
       widgets: unknown[];
       data: { run: Run; tasks: unknown[]; artifacts: unknown[]; metrics: unknown[] };
       compatibility: unknown;
     }>(response);
 
     const ir = ResultViewIRSchema.parse(body.resultView);
+    expect(body.revision).toBe(1);
     expect(ir.id).toBe(`result-view-${created.id}`);
     expect(ir.runId).toBe(created.id);
     expect(ir.version).toBe(1);
@@ -313,13 +315,14 @@ describe('Result View API', () => {
     handle = undefined;
     handle = await bootTestServer({ projectRoot: root });
     const accepted = await login(handle.url, handle.credential);
-    const afterRestart = await readJson<{ resultView: unknown }>(
+    const afterRestart = await readJson<{ resultView: unknown; revision: number }>(
       await getJson(
         `${handle.url}/api/runs/${created.id}/result-view`,
         sessionCookie(accepted)!,
       ),
     );
     expect(afterRestart.resultView).toEqual(body.resultView);
+    expect(afterRestart.revision).toBe(body.revision);
   });
 
   it('downloads immutable Artifact bytes with the recorded media type and attachment filename', async () => {

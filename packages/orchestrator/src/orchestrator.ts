@@ -346,6 +346,38 @@ export class Orchestrator {
 
       // A queued Task with no executor job never started before shutdown.
       if (task.state === 'queued' && !job) continue;
+
+      // A local executor runs Nodes in-process, so a persisted non-terminal
+      // job means the process that owned it is gone: the attempt was
+      // interrupted. A Slurm Job runs outside the Server, so reconnect to the
+      // existing Job and keep the attempt running instead of fabricating a
+      // failure and submitting a duplicate Job.
+      if (job && this.executor.kind === 'slurm') {
+        const jobId = task.jobId ?? job.jobId;
+        if (task.state !== 'running') {
+          const startedAt = task.startedAt ?? this.now();
+          this.store.updateTask(task.id, {
+            state: 'running',
+            jobId,
+            logsPath:
+              task.logsPath ??
+              `${this.store.taskNamespacePath(run.id, task.id)}/logs.txt`,
+            startedAt,
+          });
+          this.store.appendEvent({
+            runId: run.id,
+            taskId: task.id,
+            type: 'task.running',
+            payload: { nodeId: planned.node.nodeId, attempt: task.attempt },
+            createdAt: startedAt,
+          });
+        } else if (task.jobId !== jobId) {
+          this.store.updateTask(task.id, { jobId });
+        }
+        tasks.set(planned.node.nodeId, this.store.getTask(task.id)!);
+        continue;
+      }
+
       tasks.set(planned.node.nodeId, this.interruptTask(run, planned.node, task));
     }
 
@@ -621,52 +653,67 @@ export class Orchestrator {
 
     const node = planned.node;
     const logsPath = `${this.store.taskNamespacePath(run.id, task.id)}/logs.txt`;
-    const startedAt = this.now();
-    this.store.updateTask(task.id, {
-      state: 'running',
-      logsPath,
-      startedAt,
-    });
-    this.store.appendEvent({
-      runId: run.id,
-      taskId: task.id,
-      type: 'task.running',
-      payload: { nodeId: node.nodeId, attempt: task.attempt },
-      createdAt: startedAt,
-    });
-
-    const spec: TaskSpec = {
-      runId: run.id,
-      taskId: task.id,
-      nodeId: node.nodeId,
-      attempt: task.attempt,
-      manifestId: node.manifestId,
-      manifestVersion: node.manifestVersion,
-      parameters: node.parameters,
-      fileReferences: node.fileReferences,
-      inputs,
-      resources: node.resources,
-      environment: node.environment,
-      taskDir: this.store.taskNamespace(run.id, task.id),
-    };
+    // A live out-of-process Job (Slurm) is adopted after a restart: the
+    // attempt is already running and its executor Job must be monitored, not
+    // submitted again.
+    const adoptedJobId =
+      this.executor.kind === 'slurm' && task.state === 'running' && task.jobId
+        ? task.jobId
+        : undefined;
+    if (!adoptedJobId) {
+      const startedAt = this.now();
+      this.store.updateTask(task.id, {
+        state: 'running',
+        logsPath,
+        startedAt,
+      });
+      this.store.appendEvent({
+        runId: run.id,
+        taskId: task.id,
+        type: 'task.running',
+        payload: { nodeId: node.nodeId, attempt: task.attempt },
+        createdAt: startedAt,
+      });
+    } else if (!task.logsPath) {
+      this.store.updateTask(task.id, { logsPath });
+    }
 
     let jobId: string;
-    try {
-      // Shutdown monitoring must not cancel executor work; cancellation is an
-      // explicit executor.cancel call when a Run is canceled.
-      const submitted = await this.executor.submit(spec);
-      jobId = submitted.jobId;
-      if (this.isTerminal(task.id)) {
-        // The attempt was canceled while submission was in flight; the job
-        // must stop even though it was not visible to the cancel sweep.
-        await this.executor.cancel(jobId).catch(() => undefined);
-        return { type: 'stopped' };
+    if (adoptedJobId) {
+      jobId = adoptedJobId;
+    } else {
+      const spec: TaskSpec = {
+        runId: run.id,
+        taskId: task.id,
+        nodeId: node.nodeId,
+        attempt: task.attempt,
+        manifestId: node.manifestId,
+        manifestVersion: node.manifestVersion,
+        parameters: node.parameters,
+        fileReferences: node.fileReferences,
+        inputs,
+        resources: node.resources,
+        environment: node.environment,
+        taskDir: this.store.taskNamespace(run.id, task.id),
+      };
+
+      try {
+        // Shutdown monitoring must not cancel executor work; cancellation is an
+        // explicit executor.cancel call when a Run is canceled.
+        const submitted = await this.executor.submit(spec);
+        jobId = submitted.jobId;
+        if (this.isTerminal(task.id)) {
+          // The attempt was canceled while submission was in flight; the job
+          // must stop even though it was not visible to the cancel sweep.
+          await this.executor.cancel(jobId).catch(() => undefined);
+          return { type: 'stopped' };
+        }
+        this.store.updateTask(task.id, { jobId });
+      } catch (error) {
+        if (this.closing) return { type: 'stopped' };
+        if (this.isTerminal(task.id)) return { type: 'stopped' };
+        return this.failAttempt(run, planned, task, errorMessage(error), 'unknown');
       }
-      this.store.updateTask(task.id, { jobId });
-    } catch (error) {
-      if (this.closing) return { type: 'stopped' };
-      if (this.isTerminal(task.id)) return { type: 'stopped' };
-      return this.failAttempt(run, planned, task, errorMessage(error), 'unknown');
     }
 
     if (this.closing) return { type: 'stopped' };

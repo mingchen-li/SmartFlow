@@ -3,9 +3,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CandidateSetSchema, type CandidateSet } from '@sflow/domain';
+import {
+  SLURM_TASK_INPUT_VERSION,
+  CandidateSetSchema,
+  type CandidateSet,
+} from '@sflow/domain';
 import { runProductionStructurePredictionContainer } from '../src';
-import { STRUCTURE_PREDICTION_TASK_INPUT_VERSION } from '../src';
 
 const roots: string[] = [];
 
@@ -30,7 +33,7 @@ const DESIGNS: CandidateSet = CandidateSetSchema.parse({
 
 function taskInput(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    version: STRUCTURE_PREDICTION_TASK_INPUT_VERSION,
+    version: SLURM_TASK_INPUT_VERSION,
     runId: 'run-1',
     taskId: 'task-4',
     nodeId: 'node-predictor',

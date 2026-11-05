@@ -208,7 +208,7 @@ export async function createProjectServer(
   registerNodeRoutes(app, catalog);
   registerWidgetRoutes(app);
   registerWorkspaceRoutes(app, store);
-  registerRunRoutes(app, store, orchestrator, catalog);
+  registerRunRoutes(app, store, orchestrator, catalog, executorKind);
   registerAgentPatchRoutes(app, store, catalog);
   registerTerminalRoute(app, store);
   registerPages(app, session, webDist);

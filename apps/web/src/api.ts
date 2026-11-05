@@ -1,7 +1,7 @@
 import type {
+  AgentPatchApplicationResponse,
   AgentPatchProposalRequest,
   AgentPatchResponse,
-  AgentPatchWorkflowResponse,
   CreateRunResponse,
   ErrorResponse,
   FileListResponse,
@@ -251,19 +251,33 @@ export function proposeAgentPatch(
   );
 }
 
+/**
+ * Result View patches are proposed through the Run that owns the page, so
+ * binding validation can use that Run's current data and Widgets.
+ */
+export function proposeResultViewPatch(
+  runId: string,
+  proposal: AgentPatchProposalRequest,
+): Promise<AgentPatchResponse> {
+  return apiPost<AgentPatchResponse>(
+    `/api/runs/${encodeURIComponent(runId)}/agent/patches`,
+    proposal,
+  );
+}
+
 export function getAgentPatch(id: string): Promise<AgentPatchResponse> {
   return apiGet<AgentPatchResponse>(`/api/agent/patches/${encodeURIComponent(id)}`);
 }
 
-export function applyAgentPatch(id: string): Promise<AgentPatchWorkflowResponse> {
-  return apiPost<AgentPatchWorkflowResponse>(
+export function applyAgentPatch(id: string): Promise<AgentPatchApplicationResponse> {
+  return apiPost<AgentPatchApplicationResponse>(
     `/api/agent/patches/${encodeURIComponent(id)}/apply`,
     {},
   );
 }
 
-export function revertAgentPatch(id: string): Promise<AgentPatchWorkflowResponse> {
-  return apiPost<AgentPatchWorkflowResponse>(
+export function revertAgentPatch(id: string): Promise<AgentPatchApplicationResponse> {
+  return apiPost<AgentPatchApplicationResponse>(
     `/api/agent/patches/${encodeURIComponent(id)}/revert`,
     {},
   );

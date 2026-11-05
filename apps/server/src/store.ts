@@ -60,6 +60,11 @@ interface AgentPatchRow {
   created_at: string;
 }
 
+interface ResultViewRow {
+  ir_json: string;
+  revision: number;
+}
+
 interface FileReferenceRow {
   id: string;
   path: string;
@@ -85,6 +90,16 @@ export interface StoredInstalledNode {
   manifest: NodeManifest;
   path: string;
   installedAt: string;
+}
+
+/**
+ * A persisted Result View with its row revision. The revision is metadata used
+ * to detect stale Agent patches; the strict Result View IR itself carries no
+ * revision.
+ */
+export interface ResultViewEntry {
+  resultView: ResultViewIR;
+  revision: number;
 }
 
 interface RunRow {
@@ -924,36 +939,51 @@ export class ProjectStore implements OrchestratorStore {
    * Result View IR is the durable description of a Run's analysis page. It is
    * stored as validated JSON so the page survives restarts without depending
    * on any frontend bundle.
+   *
+   * `revision` is row metadata, not part of the IR. A normal save keeps the
+   * existing revision; Agent patch application and revert pass the next
+   * revision explicitly so stale bases are detectable.
    */
-  saveResultView(resultView: ResultViewIR): ResultViewIR {
+  saveResultView(resultView: ResultViewIR, revision?: number): ResultViewEntry {
     const parsed = ResultViewIRSchema.parse(resultView);
     requireNamespaceId(parsed.runId, 'Run');
+    const nextRevision = revision ?? this.getResultViewEntry(parsed.runId)?.revision ?? 1;
+    if (!Number.isInteger(nextRevision) || nextRevision < 0) {
+      throw new Error(`Result View revision must be a non-negative integer: ${nextRevision}`);
+    }
     const updatedAt = new Date().toISOString();
     this.db
       .prepare(
-        `INSERT INTO result_views (run_id, ir_json, updated_at)
-         VALUES (?, ?, ?)
+        `INSERT INTO result_views (run_id, ir_json, revision, updated_at)
+         VALUES (?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
            ir_json = excluded.ir_json,
+           revision = excluded.revision,
            updated_at = excluded.updated_at`,
       )
-      .run(parsed.runId, JSON.stringify(parsed), updatedAt);
-    return parsed;
+      .run(parsed.runId, JSON.stringify(parsed), nextRevision, updatedAt);
+    return { resultView: parsed, revision: nextRevision };
   }
 
-  getResultView(runId: string): ResultViewIR | undefined {
+  getResultViewEntry(runId: string): ResultViewEntry | undefined {
     requireNamespaceId(runId, 'Run');
     const row = this.db
-      .prepare('SELECT ir_json FROM result_views WHERE run_id = ?')
-      .get(runId) as unknown as { ir_json: string } | undefined;
+      .prepare('SELECT ir_json, revision FROM result_views WHERE run_id = ?')
+      .get(runId) as unknown as ResultViewRow | undefined;
     if (!row) return undefined;
 
     try {
       const parsed = ResultViewIRSchema.safeParse(JSON.parse(row.ir_json));
-      return parsed.success ? parsed.data : undefined;
+      return parsed.success
+        ? { resultView: parsed.data, revision: row.revision }
+        : undefined;
     } catch {
       return undefined;
     }
+  }
+
+  getResultView(runId: string): ResultViewIR | undefined {
+    return this.getResultViewEntry(runId)?.resultView;
   }
 
   getArtifact(runId: string, artifactId: string): Artifact | undefined {
@@ -1267,6 +1297,7 @@ export class ProjectStore implements OrchestratorStore {
       CREATE TABLE IF NOT EXISTS result_views (
         run_id TEXT PRIMARY KEY,
         ir_json TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
         updated_at TEXT NOT NULL
       );
 
@@ -1344,6 +1375,10 @@ export class ProjectStore implements OrchestratorStore {
     this.ensureColumn('metrics', 'scale_json', 'TEXT');
     this.ensureColumn('metrics', 'direction', 'TEXT');
     this.ensureColumn('metrics', 'schema_json', "TEXT NOT NULL DEFAULT '{}'");
+
+    // Result Views created before Agent Result View patches (code review)
+    // have no row revision; existing pages start at revision 1.
+    this.ensureColumn('result_views', 'revision', 'INTEGER NOT NULL DEFAULT 1');
 
     this.db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS tasks_run_node_attempt

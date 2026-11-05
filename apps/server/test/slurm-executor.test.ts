@@ -205,6 +205,7 @@ describe('Server Compute Executor selection', () => {
     const detail = await waitForTerminal(handle, cookie, created.run.id);
 
     expect(detail.run.status).toBe('completed');
+    expect(detail.executorKind).toBe('slurm');
     expect(detail.tasks).toHaveLength(5);
     expect(detail.tasks.every((task) => task.state === 'completed')).toBe(true);
     expect(detail.tasks.every((task) => task.jobId !== undefined)).toBe(true);

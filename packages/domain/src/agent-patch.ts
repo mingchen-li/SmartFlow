@@ -7,6 +7,7 @@ import {
 } from './json-patch';
 import { ValidationDiagnosticSchema } from './workflow-validation';
 import { WorkflowIRSchema } from './workflow';
+import { ResultViewIRSchema } from './result-view';
 
 /**
  * Agent mutation contracts (ADR-0005, ticket #15).
@@ -141,6 +142,25 @@ export const AgentPatchWorkflowResponseSchema = z.strictObject({
   revision: z.number().int().nonnegative(),
 });
 export type AgentPatchWorkflowResponse = z.infer<typeof AgentPatchWorkflowResponseSchema>;
+
+/**
+ * Result View apply and revert return the patched IR with its new persisted
+ * revision. The revision is row metadata; the strict Result View IR shape is
+ * unchanged.
+ */
+export const AgentPatchResultViewResponseSchema = z.strictObject({
+  patch: AgentPatchSchema,
+  resultView: ResultViewIRSchema,
+  revision: z.number().int().nonnegative(),
+});
+export type AgentPatchResultViewResponse = z.infer<
+  typeof AgentPatchResultViewResponseSchema
+>;
+
+/** Response shape of applying or reverting any scoped Agent patch. */
+export type AgentPatchApplicationResponse =
+  | AgentPatchWorkflowResponse
+  | AgentPatchResultViewResponse;
 
 export const AgentPatchListResponseSchema = z.strictObject({
   patches: z.array(AgentPatchSchema),

@@ -67,10 +67,6 @@ export const builtinWidgetDescriptors: readonly WidgetDescriptor[] = [
   structureViewerWidget,
 ];
 
-export function findWidgetDescriptor(id: string): WidgetDescriptor | undefined {
-  return builtinWidgetDescriptors.find((widget) => widget.id === id);
-}
-
 /**
  * Reads the Widget registry. Results Agents and future extensions compose
  * these registered descriptors; they cannot submit render code.

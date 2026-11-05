@@ -212,6 +212,13 @@ export function AgentSurface({
       }
 
       const result = await applyAgentPatch(patch.id);
+      if (!('workflow' in result)) {
+        setPatchError(
+          patch.id,
+          'The Server returned a Result View patch to the Workflow Agent surface.',
+        );
+        return;
+      }
       updatePatch(result.patch);
       onWorkflowApplied(result.workflow, result.revision);
       onNotify('Agent patch applied to the Workflow draft.');
@@ -236,6 +243,13 @@ export function AgentSurface({
       }
 
       const result = await revertAgentPatch(patch.id);
+      if (!('workflow' in result)) {
+        setPatchError(
+          patch.id,
+          'The Server returned a Result View patch to the Workflow Agent surface.',
+        );
+        return;
+      }
       updatePatch(result.patch);
       onWorkflowApplied(result.workflow, result.revision);
       onNotify('Agent patch reverted; the prior Workflow was restored.');

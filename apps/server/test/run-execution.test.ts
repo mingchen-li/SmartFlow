@@ -123,6 +123,7 @@ describe('Run execution API', () => {
       await getJson(`${handle!.url}/api/runs/${created.id}`, cookie),
     );
     expect(inFlight.run.id).toBe(created.id);
+    expect(inFlight.executorKind).toBe('local');
     expect(inFlight.tasks).toHaveLength(5);
     expect(inFlight.tasks.every((task) => task.attempt === 1)).toBe(true);
 

@@ -10,11 +10,12 @@ const FALLBACK_PAGE = `<!doctype html>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SFlow</title>
     <style>
-      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #F6F6F7; color: #242428; font-family: system-ui, sans-serif; }
+      :root { color-scheme: light dark; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: Canvas; color: CanvasText; font-family: system-ui, sans-serif; }
       main { max-width: 34rem; padding: 2rem; text-align: center; }
-      .brand { color: #3572FF; font-size: 1.5rem; font-weight: 700; letter-spacing: 0.02em; }
-      p { color: #8A8A97; line-height: 1.6; }
-      code { color: #242428; }
+      .brand { color: LinkText; font-size: 1.5rem; font-weight: 700; letter-spacing: 0.02em; }
+      p { color: GrayText; line-height: 1.6; }
+      code { color: CanvasText; }
     </style>
   </head>
   <body>

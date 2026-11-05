@@ -210,11 +210,20 @@ export const RunEventSchema = z.strictObject({
 });
 export type RunEvent = z.infer<typeof RunEventSchema>;
 
+export const ExecutorKindSchema = z.enum(['local', 'slurm']);
+export type ExecutorKind = z.infer<typeof ExecutorKindSchema>;
+
+/**
+ * Run detail includes the Compute Executor that owns the Run's Tasks so the
+ * client renders scheduler identity from Server state instead of assuming the
+ * local executor.
+ */
 export const RunDetailResponseSchema = z.strictObject({
   run: RunSchema,
   tasks: z.array(TaskSchema),
   artifacts: z.array(ArtifactSchema),
   metrics: z.array(MetricSchema),
+  executorKind: ExecutorKindSchema,
 });
 export type RunDetailResponse = z.infer<typeof RunDetailResponseSchema>;
 

@@ -1,7 +1,11 @@
 import {
+  CANDIDATE_SET_SCHEMA_REF,
+  COMPARISON_REPORT_SCHEMA_REF,
   CandidateSetSchema,
   NodeExecutionError,
   ComparisonReportSchema,
+  PREDICTED_STRUCTURE_SCHEMA_REF,
+  TARGET_STRUCTURE_SCHEMA_REF,
   TargetStructureSchema,
   type CandidateSet,
   type ComparisonReport,
@@ -37,17 +41,9 @@ const FRAMEWORK = [
   'WGQGTQVTVSS',
 ].join('');
 
-const TARGET_SCHEMA = { namespace: 'sflow.binder', name: 'target-structure', version: '1.0.0' };
-const CANDIDATE_SET_SCHEMA = {
-  namespace: 'sflow.binder',
-  name: 'candidate-set',
-  version: '1.0.0',
-};
-const COMPARISON_REPORT_SCHEMA = {
-  namespace: 'sflow.binder',
-  name: 'comparison-report',
-  version: '1.0.0',
-};
+const TARGET_SCHEMA = TARGET_STRUCTURE_SCHEMA_REF;
+const CANDIDATE_SET_SCHEMA = CANDIDATE_SET_SCHEMA_REF;
+const COMPARISON_REPORT_SCHEMA = COMPARISON_REPORT_SCHEMA_REF;
 
 /** FNV-1a over UTF-16 code units; stable across platforms and processes. */
 function hashText(value: string): number {
@@ -557,7 +553,7 @@ export function runStructurePrediction(
           name: `${structure.candidateId}.pdb`,
           relativePath: `structures/${structure.candidateId}.pdb`,
           mediaType: 'chemical/x-pdb',
-          schema: { namespace: 'sflow.binder', name: 'predicted-structure', version: '1.0.0' },
+          schema: PREDICTED_STRUCTURE_SCHEMA_REF,
         })),
       },
     ],
@@ -725,8 +721,3 @@ export function createBuiltinNodeRegistry(): NodeRegistry {
     list: () => builtinNodeImplementations,
   };
 }
-
-/** Manifest ids and versions implemented by this package. */
-export const BUILTIN_NODE_IDS: readonly string[] = builtinManifests.map(
-  (manifest) => manifest.id,
-);

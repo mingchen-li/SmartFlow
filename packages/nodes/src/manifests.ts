@@ -562,5 +562,3 @@ export const builtinManifests: readonly NodeManifest[] = [
 export function builtinManifestById(id: string): NodeManifest | undefined {
   return builtinManifests.find((manifest) => manifest.id === id);
 }
-
-export const NODES_PACKAGE = '@sflow/nodes';

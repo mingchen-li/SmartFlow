@@ -595,6 +595,12 @@ export function validateResultViewBindings(
 
 export const ResultViewResponseSchema = z.strictObject({
   resultView: ResultViewIRSchema,
+  /**
+   * Persisted revision of the Result View row. It is row metadata and never
+   * part of the strict Result View IR, so Agent patches can detect stale bases
+   * without changing the durable page description.
+   */
+  revision: z.number().int().nonnegative(),
   widgets: z.array(WidgetDescriptorSchema),
   data: ResultViewDataSchema,
   compatibility: ResultViewCompatibilityReportSchema,

@@ -1,0 +1,17 @@
+{
+  "name": "@sflow/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.0",
+    "@fastify/static": "^8.0.0",
+    "@fastify/websocket": "^11.0.0",
+    "@sflow/domain": "workspace:*",
+    "fastify": "^5.12.8",
+    "zod": "^4.6.7"
+  }
+}

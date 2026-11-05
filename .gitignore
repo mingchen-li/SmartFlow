@@ -223,12 +223,16 @@ pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,macos,linux
 
-### Node / SFlow ###
+### Node / pnpm / SFlow ###
 node_modules/
 .pnpm-store/
+dist/
 build/
+.tmp/
 coverage/
+pnpm-debug.log*
+*.tsbuildinfo
+.sflow/
 test-results/
 playwright-report/
-.sflow/
-*.tsbuildinfo
+blob-report/

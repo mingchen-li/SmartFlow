@@ -57,6 +57,9 @@ importers:
         specifier: ^4.6.7
         version: 4.6.7
     devDependencies:
+      '@sflow/nodes-structure-prediction':
+        specifier: workspace:*
+        version: link:../../packages/nodes-structure-prediction
       '@types/ws':
         specifier: ^8.18.2
         version: 8.18.2
@@ -115,6 +118,19 @@ importers:
       '@sflow/domain':
         specifier: workspace:*
         version: link:../domain
+
+  packages/nodes-structure-prediction:
+    dependencies:
+      '@sflow/domain':
+        specifier: workspace:*
+        version: link:../domain
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
+    devDependencies:
+      '@sflow/nodes':
+        specifier: workspace:*
+        version: link:../nodes
 
   packages/orchestrator:
     dependencies:

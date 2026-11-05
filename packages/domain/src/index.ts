@@ -144,6 +144,7 @@ export * from './run';
 export * from './scientific';
 export * from './execution';
 export * from './node-run';
+export * from './result-view';
 
 /**
  * `WS /api/terminal` protocol.

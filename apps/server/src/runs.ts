@@ -1,15 +1,21 @@
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import {
   BINDER_REQUIRED_OUTPUTS,
   CreateRunRequestSchema,
+  RunArtifactParamsSchema,
   RunEventsQuerySchema,
   RunParamsSchema,
   RunTaskParamsSchema,
   WorkflowParamsSchema,
+  buildDefaultResultView,
   createRunSnapshot,
+  validateResultViewBindings,
   validateWorkflow,
+  type ResultViewIR,
+  type ResultViewResponse,
+  type Run,
   type RunDetailResponse,
   type RunEventsResponse,
   type TaskLogsResponse,
@@ -18,6 +24,24 @@ import { builtinManifests } from '@sflow/nodes';
 import type { Orchestrator } from '@sflow/orchestrator';
 import { HttpError, parseOrThrow } from './errors';
 import type { ProjectStore } from './store';
+import { builtinWidgetDescriptors } from './widgets';
+
+/**
+ * Builds the default Result View for a Run. The persisted IR describes ordered
+ * blocks and schema-bound selectors; it carries no frontend components and is
+ * independent of the data that later resolves against it.
+ */
+function defaultResultView(store: ProjectStore, run: Run): ResultViewIR {
+  const existing = store.getResultView(run.id);
+  if (existing) return existing;
+  return store.saveResultView(
+    buildDefaultResultView({
+      runId: run.id,
+      createdAt: run.createdAt,
+      widgets: builtinWidgetDescriptors,
+    }),
+  );
+}
 
 /**
  * Validation and Run execution seam. A Run may only start from a draft that
@@ -70,6 +94,10 @@ export function registerRunRoutes(
       workflowId: id,
       snapshot: createRunSnapshot(draft.workflow, builtinManifests),
     });
+
+    // Every Run owns a durable Result View from the moment it exists, before
+    // execution produces any data to resolve against it.
+    defaultResultView(store, run);
 
     // Execution is owned by the Orchestrator and stays observable after this
     // response returns. The Run snapshot was already persisted.
@@ -125,6 +153,75 @@ export function registerRunRoutes(
       lines,
     };
   });
+
+  app.get('/api/runs/:id/result-view', async (request): Promise<ResultViewResponse> => {
+    const { id } = parseOrThrow(RunParamsSchema, request.params);
+    const run = store.getRun(id);
+    if (!run) {
+      throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
+    }
+
+    const resultView = defaultResultView(store, run);
+    const data = {
+      run,
+      tasks: store.listTasks(id),
+      artifacts: store.listArtifacts(id),
+      metrics: store.listMetrics(id),
+    };
+    const widgets = [...builtinWidgetDescriptors];
+
+    return {
+      resultView,
+      widgets,
+      data,
+      compatibility: validateResultViewBindings(resultView, data, widgets),
+    };
+  });
+
+  app.get(
+    '/api/runs/:id/artifacts/:artifactId/download',
+    async (request, reply) => {
+      const { id, artifactId } = parseOrThrow(RunArtifactParamsSchema, request.params);
+      const run = store.getRun(id);
+      if (!run) {
+        throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
+      }
+
+      // Artifact lookup is scoped to the Run, so one Run can never address
+      // another Run's managed output.
+      const artifact = store.getArtifact(id, artifactId);
+      if (!artifact) {
+        throw new HttpError(404, 'NOT_FOUND', 'Artifact not found.');
+      }
+
+      const absolute = resolve(store.root, artifact.path);
+      const namespace = `.sflow/runs/${id}/tasks/`;
+      const insideProject = (() => {
+        const rel = relative(store.root, absolute);
+        return rel.length > 0 && rel !== '..' && !rel.startsWith('..') && !isAbsolute(rel);
+      })();
+      if (!artifact.path.startsWith(namespace) || !insideProject) {
+        throw new HttpError(404, 'NOT_FOUND', 'Artifact not found.');
+      }
+
+      let bytes: Buffer;
+      try {
+        bytes = readFileSync(absolute);
+      } catch {
+        throw new HttpError(404, 'NOT_FOUND', 'Artifact bytes are unavailable.');
+      }
+
+      const filename = artifact.name.replace(/["\\\r\n]/g, '_');
+      return reply
+        .header('content-type', artifact.mediaType)
+        .header('content-disposition', `attachment; filename="${filename}"`)
+        .header('content-length', String(bytes.byteLength))
+        .header('x-content-type-options', 'nosniff')
+        .header('etag', `"${artifact.sha256}"`)
+        .header('cache-control', 'private, max-age=31536000, immutable')
+        .send(bytes);
+    },
+  );
 
   app.get('/api/runs/:id/events', async (request): Promise<RunEventsResponse> => {
     const { id } = parseOrThrow(RunParamsSchema, request.params);

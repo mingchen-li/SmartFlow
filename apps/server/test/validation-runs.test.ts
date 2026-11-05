@@ -7,7 +7,7 @@ import {
   type CreateRunResponse,
   type ErrorResponse,
   type FileReference,
-  type Run,
+  type RunDetailResponse,
   type RunListResponse,
   type ValidationDiagnostic,
   type ValidateWorkflowResponse,
@@ -492,20 +492,27 @@ describe('Workflow validation and Run snapshots API', () => {
     }
     expect(serialized).not.toContain('node-target":{"x"');
 
-    // The Run is retrievable and persisted in Project state.
-    const fetched = await readJson<Run>(
+    // The Run is retrievable and persisted in Project state. Execution starts
+    // immediately, so the immutable snapshot — not the live status — is the
+    // fact this test pins.
+    const fetched = await readJson<RunDetailResponse>(
       await getJson(`${handle!.url}/api/runs/${run.id}`, cookie),
     );
-    expect(fetched).toEqual(run);
+    expect(fetched.run.id).toBe(run.id);
+    expect(fetched.run.workflowId).toBe(run.workflowId);
+    expect(fetched.run.snapshot).toEqual(run.snapshot);
+    expect(fetched.tasks).toHaveLength(5);
 
     await handle!.close({ cleanupProject: false });
     handle = undefined;
     handle = await bootTestServer({ projectRoot: root });
     const accepted = await login(handle.url, handle.credential);
-    const afterRestart = await readJson<Run>(
+    const afterRestart = await readJson<RunDetailResponse>(
       await getJson(`${handle.url}/api/runs/${run.id}`, sessionCookie(accepted)!),
     );
-    expect(afterRestart).toEqual(run);
+    expect(afterRestart.run.id).toBe(run.id);
+    expect(afterRestart.run.snapshot).toEqual(run.snapshot);
+    expect(afterRestart.tasks).toHaveLength(5);
   });
 
   it('keeps Runs unchanged after later draft edits while future Runs see the edits', async () => {
@@ -547,17 +554,17 @@ describe('Workflow validation and Run snapshots API', () => {
       cookie,
     );
 
-    const fetchedAfterEdit = await readJson<Run>(
+    const fetchedAfterEdit = await readJson<RunDetailResponse>(
       await getJson(`${handle!.url}/api/runs/${first.run.id}`, cookie),
     );
-    expect(fetchedAfterEdit).toEqual(first.run);
+    expect(fetchedAfterEdit.run.snapshot).toEqual(first.run.snapshot);
     expect(
-      fetchedAfterEdit.snapshot.workflow.nodes.find(
+      fetchedAfterEdit.run.snapshot.workflow.nodes.find(
         (node) => node.id === fixture.nodeIds.target,
       )?.label,
     ).toBe('Target input');
     expect(
-      fetchedAfterEdit.snapshot.nodes.find(
+      fetchedAfterEdit.run.snapshot.nodes.find(
         (node) => node.nodeId === fixture.nodeIds.generator,
       )?.parameters.numCandidates,
     ).toBe(100);
@@ -581,7 +588,9 @@ describe('Workflow validation and Run snapshots API', () => {
       await getJson(`${handle!.url}/api/runs`, cookie),
     );
     expect(listed.runs.map((run) => run.id)).toEqual([second.run.id, first.run.id]);
-    expect(listed.runs.find((run) => run.id === first.run.id)).toEqual(first.run);
+    expect(listed.runs.find((run) => run.id === first.run.id)?.snapshot).toEqual(
+      first.run.snapshot,
+    );
   });
 
   it('requires authentication and returns 404 for unknown drafts and Runs', async () => {

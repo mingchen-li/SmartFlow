@@ -47,6 +47,9 @@ importers:
       '@sflow/nodes':
         specifier: workspace:*
         version: link:../../packages/nodes
+      '@sflow/orchestrator':
+        specifier: workspace:*
+        version: link:../../packages/orchestrator
       fastify:
         specifier: ^5.12.8
         version: 5.12.8
@@ -118,6 +121,10 @@ importers:
       '@sflow/domain':
         specifier: workspace:*
         version: link:../domain
+    devDependencies:
+      '@sflow/nodes':
+        specifier: workspace:*
+        version: link:../nodes
 
   packages/test-support:
     dependencies:

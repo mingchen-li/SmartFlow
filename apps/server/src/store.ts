@@ -477,6 +477,22 @@ export class ProjectStore implements OrchestratorStore {
     return run;
   }
 
+  /** Non-terminal Runs, rebuilt by restart reconciliation. */
+  listActiveRuns(): Run[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, workflow_id, snapshot_json, state, created_at, updated_at
+         FROM runs WHERE state IN ('queued', 'running')
+         ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all() as unknown as RunRow[];
+
+    return rows.flatMap((row) => {
+      const run = this.rowToRun(row);
+      return run ? [run] : [];
+    });
+  }
+
   getRun(id: string): Run | undefined {
     requireNamespaceId(id, 'Run');
     const row = this.db
@@ -652,6 +668,28 @@ export class ProjectStore implements OrchestratorStore {
     } catch {
       return undefined;
     }
+  }
+
+  findArtifact(taskId: string, name: string): Artifact | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id, run_id, task_id, node_id, name, media_type, path, sha256, size,
+                schema_json, provenance_json, created_at
+         FROM artifacts WHERE task_id = ? AND name = ?`,
+      )
+      .get(taskId, name) as unknown as ArtifactRow | undefined;
+    return row ? this.rowToArtifact(row) : undefined;
+  }
+
+  findMetric(taskId: string, metricId: string): Metric | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id, run_id, task_id, node_id, metric_id, name, meaning, value_type, value_json,
+                unit, scale_json, direction, schema_json, provenance_json, created_at
+         FROM metrics WHERE task_id = ? AND metric_id = ?`,
+      )
+      .get(taskId, metricId) as unknown as MetricRow | undefined;
+    return row ? this.rowToMetric(row) : undefined;
   }
 
   /**

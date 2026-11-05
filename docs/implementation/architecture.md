@@ -118,6 +118,16 @@ All schemas live in `packages/domain` and are exported with inferred types.
   injected `CommandRunner`. Contract tests use a fake runner; no real Slurm is
   required.
 - The Server calls `orchestrator.reconcileAll()` on startup.
+- Restart reconciliation is deterministic. A Task whose executor job completed
+  while the Server was down is adopted without re-execution. A Task attempt that
+  was `running` when the process died (or was queued with a persisted executor
+  job) is closed as `failed` with exit code 137 and the message "The Server
+  restarted while this Task attempt was running.", and a new attempt is queued
+  for the same Node. Completed Tasks are never re-run or rewritten, and queued
+  Tasks with no executor job resume in place. Reconciliation is idempotent.
+- Server shutdown stops monitoring without canceling executor work or writing
+  terminal Run/Task state, so the next process reconciles from persisted Project
+  and executor records.
 - Task state vocabulary: `queued`, `running`, `completed`, `failed`, `canceled`.
   A rerun creates a new attempt; prior attempts stay visible.
 - Logs are line-oriented files. Events are append-only DB rows for state changes.

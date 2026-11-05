@@ -139,6 +139,8 @@ export const WorkflowParamsSchema = z.object({
 export type WorkflowParams = z.infer<typeof WorkflowParamsSchema>;
 
 export * from './workflow';
+export * from './workflow-validation';
+export * from './run';
 
 /**
  * `WS /api/terminal` protocol.

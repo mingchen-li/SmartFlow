@@ -1,4 +1,5 @@
 import type {
+  CreateRunResponse,
   ErrorResponse,
   FileListResponse,
   FileReference,
@@ -7,8 +8,11 @@ import type {
   NodeCatalogResponse,
   Project,
   RotateCredentialResponse,
+  Run,
+  RunListResponse,
   SaveWorkflowDraftRequest,
   SessionResponse,
+  ValidateWorkflowResponse,
   WorkflowDraft,
 } from '@sflow/domain';
 
@@ -17,6 +21,7 @@ export class ApiError extends Error {
     readonly status: number,
     message: string,
     readonly code: string = 'REQUEST_FAILED',
+    readonly details?: unknown,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -37,18 +42,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     let message = `Request failed with status ${response.status}.`;
     let code = 'REQUEST_FAILED';
+    let details: unknown;
 
     try {
       const body = (await response.json()) as ErrorResponse;
       if (body.error) {
         message = body.error.message;
         code = body.error.code;
+        details = body.error.details;
       }
     } catch {
       // Non-JSON error response; keep the status-based message.
     }
 
-    throw new ApiError(response.status, message, code);
+    throw new ApiError(response.status, message, code, details);
   }
 
   return (await response.json()) as T;
@@ -119,4 +126,30 @@ export function saveWorkflow(
   input: SaveWorkflowDraftRequest,
 ): Promise<WorkflowDraft> {
   return apiPut<WorkflowDraft>(`/api/workflows/${encodeURIComponent(id)}`, input);
+}
+
+/** Validates the persisted draft; callers should save edits first. */
+export function validateWorkflowDraft(
+  id: string,
+): Promise<ValidateWorkflowResponse> {
+  return apiPost<ValidateWorkflowResponse>(
+    `/api/workflows/${encodeURIComponent(id)}/validate`,
+    {},
+  );
+}
+
+/** Starts a Run from the persisted draft; rejects with 422 when invalid. */
+export function createRun(id: string): Promise<CreateRunResponse> {
+  return apiPost<CreateRunResponse>(
+    `/api/workflows/${encodeURIComponent(id)}/runs`,
+    {},
+  );
+}
+
+export function getRun(id: string): Promise<Run> {
+  return apiGet<Run>(`/api/runs/${encodeURIComponent(id)}`);
+}
+
+export function listRuns(): Promise<RunListResponse> {
+  return apiGet<RunListResponse>('/api/runs');
 }

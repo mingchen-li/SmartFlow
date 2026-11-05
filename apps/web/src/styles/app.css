@@ -428,6 +428,69 @@ button {
   overflow-y: hidden;
 }
 
+/* Workflow validation */
+
+.validation-panel {
+  flex: 0 0 auto;
+  max-height: 176px;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-gray-25);
+  overflow: hidden;
+}
+
+.validation-panel-header {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+}
+
+.validation-list {
+  flex: 0 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0 var(--space-4) var(--space-3);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow-y: auto;
+}
+
+.validation-diagnostic {
+  display: grid;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-semantic-warning);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-white);
+  font-size: var(--font-size-1);
+  line-height: 1.4;
+}
+
+.validation-diagnostic[data-severity="error"] {
+  border-left-color: var(--color-semantic-destructive);
+}
+
+.validation-location {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.validation-message {
+  overflow-wrap: anywhere;
+}
+
+.validation-correction {
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
 .editor-surface {
   flex: 1 1 auto;
   min-height: 0;

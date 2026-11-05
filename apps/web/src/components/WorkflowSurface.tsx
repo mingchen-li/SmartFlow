@@ -1,25 +1,39 @@
-import type { NodeManifest } from '@sflow/domain';
+import type {
+  NodeManifest,
+  ValidateWorkflowResponse,
+} from '@sflow/domain';
 import { useEditorStore } from '../store/editor';
 import { NodeLibrary } from './NodeLibrary';
 import { WorkflowCanvas } from './WorkflowCanvas';
+import { WorkflowValidationPanel } from './WorkflowValidationPanel';
 
 export interface WorkflowSurfaceProps {
   manifests: readonly NodeManifest[];
   onValidate: () => void;
   onRun: () => void;
   onNotify: (message: string) => void;
+  validation: ValidateWorkflowResponse | null;
+  validating: boolean;
+  validationStale: boolean;
+  canRun: boolean;
+  runPending: boolean;
 }
 
 /**
- * Workflow tab strip, operation toolbar, canvas, and Node Library. The toolbar
- * remains present in maximize; Validate and Run stay visibly disabled
- * placeholders until ticket #6 supplies real operations.
+ * Workflow tab strip, operation toolbar, validation results, canvas, and Node
+ * Library. The toolbar remains present in maximize; Run is only available when
+ * the current Workflow content has passed validation.
  */
 export function WorkflowSurface({
   manifests,
   onValidate,
   onRun,
   onNotify,
+  validation,
+  validating,
+  validationStale,
+  canRun,
+  runPending,
 }: WorkflowSurfaceProps) {
   const draftName = useEditorStore((state) => state.draftName);
   const saveState = useEditorStore((state) => state.saveState);
@@ -78,17 +92,22 @@ export function WorkflowSurface({
           type="button"
           className="button button-sm button-outline"
           data-testid="validate-workflow"
+          disabled={validating}
+          aria-busy={validating}
           onClick={onValidate}
         >
-          Validate
+          {validating ? 'Validating…' : 'Validate'}
         </button>
         <button
           type="button"
           className="button button-sm button-outline"
           data-testid="run-workflow"
+          disabled={!canRun}
+          aria-busy={runPending}
+          title={canRun ? 'Start a Run from this Workflow' : 'Validate the Workflow before starting a Run'}
           onClick={onRun}
         >
-          Run
+          {runPending ? 'Starting…' : 'Run'}
         </button>
         <span className="toolbar-divider" aria-hidden="true" />
         <button
@@ -103,6 +122,11 @@ export function WorkflowSurface({
         </button>
       </div>
 
+      <WorkflowValidationPanel
+        validation={validation}
+        validating={validating}
+        stale={validationStale}
+      />
       <WorkflowCanvas manifests={manifests} onNotify={onNotify} />
       <NodeLibrary manifests={manifests} />
     </>

@@ -9,6 +9,7 @@ import { registerAuthGuard, registerAuthRoutes } from './auth';
 import { installErrorHandler } from './errors';
 import { registerNodeRoutes } from './nodes';
 import { registerPages } from './pages';
+import { registerRunRoutes } from './runs';
 import { SessionService } from './session';
 import { ProjectStore } from './store';
 import { registerTerminalRoute } from './terminal';
@@ -64,6 +65,7 @@ export async function createProjectServer(
   registerAuthRoutes(app, store, session);
   registerNodeRoutes(app);
   registerWorkspaceRoutes(app, store);
+  registerRunRoutes(app, store);
   registerTerminalRoute(app, store);
   registerPages(app, session, webDist);
 

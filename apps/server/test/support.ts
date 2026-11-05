@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { NodeImplementation, NodeRegistry } from '@sflow/domain';
+import type { CommandRunner } from '@sflow/orchestrator';
 import { createProjectServer, type ProjectServer } from '@sflow/server';
 
 export interface TestServerHandle {
@@ -19,6 +20,9 @@ export interface BootTestServerOptions {
   projectRoot?: string;
   webDist?: string;
   executorDelayMs?: number;
+  executor?: 'local' | 'slurm';
+  commandRunner?: CommandRunner;
+  sbatchArgs?: string[];
   registry?: NodeRegistry;
   nodeImplementations?: readonly NodeImplementation[];
   retryWait?: (milliseconds: number, signal: AbortSignal) => Promise<boolean>;
@@ -36,6 +40,9 @@ export async function bootTestServer(options: BootTestServerOptions = {}): Promi
     credential: options.generateCredential ? undefined : credential,
     webDist: options.webDist,
     executorDelayMs: options.executorDelayMs,
+    ...(options.executor ? { executor: options.executor } : {}),
+    ...(options.commandRunner ? { commandRunner: options.commandRunner } : {}),
+    ...(options.sbatchArgs ? { sbatchArgs: options.sbatchArgs } : {}),
     ...(options.registry ? { registry: options.registry } : {}),
     ...(options.nodeImplementations
       ? { nodeImplementations: options.nodeImplementations }

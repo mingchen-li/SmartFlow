@@ -25,6 +25,7 @@ import {
   LocalExecutor,
   Orchestrator,
   OrchestratorError,
+  SlurmExecutor,
   type NewArtifactRecord,
   type NewMetricRecord,
   type NewRunEvent,
@@ -33,6 +34,7 @@ import {
   type TaskOutputRecord,
   type TaskPatch,
 } from '@sflow/orchestrator';
+import { FakeCommandRunner, type FakeCommandRunnerOptions } from './slurm-fake';
 
 const roots: string[] = [];
 
@@ -1610,5 +1612,224 @@ describe('Orchestrator explicit rerun', () => {
     await expect(orchestrator.rerunTask(run.id, failed.id)).rejects.toMatchObject({
       code: 'TASK_SUPERSEDED',
     });
+  });
+});
+
+describe('Orchestrator through the Slurm Compute Executor', () => {
+  function makeSlurmOrchestrator(
+    fixture: Fixture,
+    store: MemoryOrchestratorStore,
+    runner: FakeCommandRunner,
+  ): { orchestrator: Orchestrator; executor: SlurmExecutor; jobsDir: string } {
+    const jobsDir = join(fixture.projectRoot, '.sflow', 'executor');
+    const executor = new SlurmExecutor({ jobsDir, runner });
+    const orchestrator = new Orchestrator({ store, executor, pollIntervalMs: 2 });
+    return { orchestrator, executor, jobsDir };
+  }
+
+  function submittedNodeIds(runner: FakeCommandRunner): string[] {
+    return runner.calls
+      .filter((call) => call.command === 'sbatch')
+      .map((call) => {
+        const script = readFileSync(call.args.at(-1)!, 'utf8');
+        const match = /export SFLOW_NODE_ID='([^']+)'/.exec(script);
+        if (!match) throw new Error('Submitted script did not carry a Node id.');
+        return match[1];
+      });
+  }
+
+  it('submits one Slurm Job per atomic Task in dependency-safe order', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(fixture.snapshot);
+    store.seedRun(run);
+    const runner = new FakeCommandRunner({ autoCompletePolls: 2 });
+    const { orchestrator, executor } = makeSlurmOrchestrator(fixture, store, runner);
+
+    await orchestrator.run(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('completed');
+    expect(submittedNodeIds(runner)).toEqual([
+      NODE_IDS.target,
+      NODE_IDS.generator,
+      NODE_IDS.designer,
+      NODE_IDS.predictor,
+      NODE_IDS.comparison,
+    ]);
+
+    const tasks = store.listTasks(run.id);
+    expect(tasks).toHaveLength(5);
+    expect(tasks.every((task) => task.state === 'completed' && task.attempt === 1)).toBe(true);
+
+    const reconciled = await executor.reconcile(run.id);
+    expect(reconciled.jobs).toHaveLength(5);
+    expect(new Set(reconciled.jobs.map((job) => job.jobId)).size).toBe(5);
+    expect(new Set(reconciled.jobs.map((job) => job.taskId)).size).toBe(5);
+    for (const task of tasks) {
+      expect(task.jobId).toBeDefined();
+      expect(reconciled.jobs.filter((job) => job.jobId === task.jobId)).toHaveLength(1);
+    }
+  });
+
+  it('adopts Jobs completed while the Server was down without duplicating Tasks or resubmitting', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(fixture.snapshot);
+    store.seedRun(run);
+    const runner = new FakeCommandRunner({
+      autoCompletePolls: 2,
+      onSubmit: (job, sequence) => {
+        // Keep the first attempt running while the first Server process stops.
+        if (sequence === 1) delete job.pollsToComplete;
+      },
+    });
+    const first = makeSlurmOrchestrator(fixture, store, runner);
+    first.orchestrator.start(run.id);
+    await waitUntil(
+      () => store.listTasks(run.id).some((task) => task.state === 'running' && task.jobId),
+      5_000,
+      'the first Slurm Job to start',
+    );
+    const running = store.listTasks(run.id).find((task) => task.state === 'running' && task.jobId)!;
+    const runningJob = [...runner.jobs.values()][0];
+    await first.orchestrator.close();
+
+    // The scheduler Job finishes while no Server process is monitoring it.
+    runner.setState(runningJob.id, 'COMPLETED', '0:0');
+    runner.writeJobLog(runningJob.id, 'completed while the server was down\n');
+    runner.writeResult(runningJob.id, { outputs: [], metrics: [] });
+
+    const restarted = makeSlurmOrchestrator(fixture, store, runner);
+    await restarted.orchestrator.reconcileAll();
+    await restarted.orchestrator.whenIdle(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('completed');
+    // The adopted Job was never resubmitted; only the remaining four Nodes ran.
+    expect(runner.calls.filter((call) => call.command === 'sbatch')).toHaveLength(5);
+    const targetAttempts = store
+      .listTasks(run.id)
+      .filter((task) => task.nodeId === NODE_IDS.target);
+    expect(targetAttempts).toHaveLength(1);
+    expect(targetAttempts[0]).toMatchObject({
+      id: running.id,
+      state: 'completed',
+      jobId: running.jobId,
+      attempt: 1,
+    });
+    expect(
+      store.events.filter(
+        (event) => event.type === 'task.completed' && event.taskId === running.id,
+      ),
+    ).toHaveLength(1);
+    expect(readFileSync(join(fixture.projectRoot, targetAttempts[0].logsPath!), 'utf8')).toContain(
+      'completed while the server was down',
+    );
+  });
+
+  it('cancels a running Slurm Job through the executor contract and leaves other work unsubmitted', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(fixture.snapshot);
+    store.seedRun(run);
+    const runner = new FakeCommandRunner();
+    const { orchestrator } = makeSlurmOrchestrator(fixture, store, runner);
+    orchestrator.start(run.id);
+    await waitUntil(
+      () => store.listTasks(run.id).some((task) => task.state === 'running' && task.jobId),
+      5_000,
+      'the first Slurm Job to start',
+    );
+    const running = store.listTasks(run.id).find((task) => task.state === 'running' && task.jobId)!;
+
+    const canceled = await orchestrator.cancelRun(run.id);
+    await orchestrator.whenIdle(run.id);
+
+    expect(canceled.status).toBe('canceled');
+    const scancelCalls = runner.calls.filter((call) => call.command === 'scancel');
+    expect(scancelCalls).toHaveLength(1);
+    expect(scancelCalls[0].args).toContain(running.jobId);
+    expect(runner.calls.filter((call) => call.command === 'sbatch')).toHaveLength(1);
+    expect(store.getTask(running.id)?.state).toBe('canceled');
+    expect(store.getRun(run.id)?.status).toBe('canceled');
+    expect(
+      store.listTasks(run.id).filter((task) => task.state === 'completed'),
+    ).toHaveLength(0);
+    await orchestrator.close();
+  });
+
+  it('reruns a failed Slurm Task as a new Job without rewriting its failed history', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(
+      snapshotWithRetry(fixture.snapshot, 'target-input', {
+        maxAttempts: 1,
+        backoffSeconds: 0,
+        retryOn: [],
+      }),
+    );
+    store.seedRun(run);
+    const runner = new FakeCommandRunner({
+      autoCompletePolls: 2,
+      terminalStateFor: (sequence) =>
+        sequence === 1 ? { state: 'PREEMPTED', exitCode: '0:9' } : { state: 'COMPLETED' },
+    });
+    const { orchestrator } = makeSlurmOrchestrator(fixture, store, runner);
+
+    await orchestrator.run(run.id);
+    const failed = store
+      .listTasks(run.id)
+      .find((task) => task.nodeId === NODE_IDS.target)!;
+    expect(store.getRun(run.id)?.status).toBe('failed');
+    expect(failed).toMatchObject({ state: 'failed', attempt: 1, failureKind: 'transient' });
+
+    await orchestrator.rerunTask(run.id, failed.id);
+    await orchestrator.whenIdle(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('completed');
+    const attempts = store
+      .listTasks(run.id)
+      .filter((task) => task.nodeId === NODE_IDS.target)
+      .sort((left, right) => left.attempt - right.attempt);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toMatchObject({ id: failed.id, state: 'failed', attempt: 1 });
+    expect(attempts[1]).toMatchObject({ state: 'completed', attempt: 2 });
+    expect(store.events.filter((event) => event.type === 'run.rerun')).toHaveLength(1);
+    // The failed attempt and the rerun attempt each consumed one Slurm Job,
+    // followed by one Job for each of the four remaining Nodes.
+    expect(runner.calls.filter((call) => call.command === 'sbatch')).toHaveLength(6);
+  });
+
+  it('retries a preempted Slurm Job through the Manifest RetryPolicy as a new Job', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(
+      snapshotWithRetry(fixture.snapshot, 'target-input', {
+        maxAttempts: 2,
+        backoffSeconds: 0,
+        retryOn: ['transient'],
+      }),
+    );
+    store.seedRun(run);
+    const options: FakeCommandRunnerOptions = {
+      autoCompletePolls: 2,
+      terminalStateFor: (sequence) =>
+        sequence === 1 ? { state: 'PREEMPTED', exitCode: '0:9' } : { state: 'COMPLETED' },
+    };
+    const runner = new FakeCommandRunner(options);
+    const { orchestrator } = makeSlurmOrchestrator(fixture, store, runner);
+
+    await orchestrator.run(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('completed');
+    const attempts = store
+      .listTasks(run.id)
+      .filter((task) => task.nodeId === NODE_IDS.target)
+      .sort((left, right) => left.attempt - right.attempt);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toMatchObject({ state: 'failed', failureKind: 'transient', attempt: 1 });
+    expect(attempts[1]).toMatchObject({ state: 'completed', attempt: 2 });
+    // One attempted Job plus one retry Job for the preempted Node, and one Job
+    // for each of the four remaining Nodes.
+    expect(runner.calls.filter((call) => call.command === 'sbatch')).toHaveLength(6);
   });
 });

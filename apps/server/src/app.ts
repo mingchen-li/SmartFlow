@@ -7,7 +7,14 @@ import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { NodeImplementation, NodeRegistry } from '@sflow/domain';
 import { createBuiltinNodeRegistry } from '@sflow/nodes';
-import { LocalExecutor, Orchestrator } from '@sflow/orchestrator';
+import {
+  LocalExecutor,
+  NodeCommandRunner,
+  Orchestrator,
+  SlurmExecutor,
+  type CommandRunner,
+  type ComputeExecutor,
+} from '@sflow/orchestrator';
 import { registerAuthGuard, registerAuthRoutes } from './auth';
 import { registerAgentPatchRoutes } from './agent-patches';
 import { installErrorHandler } from './errors';
@@ -49,6 +56,20 @@ export interface CreateProjectServerOptions {
    * delays; production keeps the Manifest-declared timing.
    */
   retryWait?: (milliseconds: number, signal: AbortSignal) => Promise<boolean>;
+  /**
+   * Compute Executor selection. Defaults to `SFLOW_EXECUTOR` when set, then
+   * `local`. The local executor keeps development and tests in-process.
+   */
+  executor?: 'local' | 'slurm';
+  /**
+   * Scheduler command seam for the Slurm executor. Production defaults to a
+   * child-process runner; tests inject a fake so no Slurm is required.
+   */
+  commandRunner?: CommandRunner;
+  /** Additional `sbatch` options for the Slurm executor. */
+  sbatchArgs?: string[];
+  /** OCI-compatible container runtime used by Slurm Jobs. */
+  containerRuntime?: string;
 }
 
 function registryKey(manifest: { id: string; version: string }): string {
@@ -93,6 +114,17 @@ function executorDelayFromEnvironment(): number {
   return Number.isFinite(milliseconds) && milliseconds > 0 ? milliseconds : 0;
 }
 
+/** Explicit option wins; otherwise `SFLOW_EXECUTOR` selects the executor. */
+export function resolveExecutorKind(option?: 'local' | 'slurm'): 'local' | 'slurm' {
+  if (option) return option;
+  const raw = process.env.SFLOW_EXECUTOR?.trim().toLowerCase();
+  if (!raw) return 'local';
+  if (raw === 'local' || raw === 'slurm') return raw;
+  throw new Error(
+    `SFLOW_EXECUTOR must be "local" or "slurm", received "${process.env.SFLOW_EXECUTOR}".`,
+  );
+}
+
 export interface ListenResult {
   url: string;
   port: number;
@@ -103,6 +135,8 @@ export interface ProjectServer {
   store: ProjectStore;
   session: SessionService;
   orchestrator: Orchestrator;
+  /** Compute Executor backing this Server: `local` or `slurm`. */
+  executorKind: 'local' | 'slurm';
   generatedCredential?: string;
   listen(port?: number, host?: string): Promise<ListenResult>;
   close(): Promise<void>;
@@ -129,12 +163,23 @@ export async function createProjectServer(
     options.nodeImplementations,
   );
   const manifests = registry.list().map((implementation) => implementation.manifest);
-  const executor = new LocalExecutor({
-    projectRoot,
-    jobsDir: join(store.sflowDir, 'executor'),
-    registry,
-    executionDelayMs: options.executorDelayMs ?? executorDelayFromEnvironment(),
-  });
+  const executorKind = resolveExecutorKind(options.executor);
+  let executor: ComputeExecutor;
+  if (executorKind === 'slurm') {
+    executor = new SlurmExecutor({
+      jobsDir: join(store.sflowDir, 'executor'),
+      runner: options.commandRunner ?? new NodeCommandRunner(),
+      ...(options.sbatchArgs ? { sbatchArgs: options.sbatchArgs } : {}),
+      ...(options.containerRuntime ? { containerRuntime: options.containerRuntime } : {}),
+    });
+  } else {
+    executor = new LocalExecutor({
+      projectRoot,
+      jobsDir: join(store.sflowDir, 'executor'),
+      registry,
+      executionDelayMs: options.executorDelayMs ?? executorDelayFromEnvironment(),
+    });
+  }
   const orchestrator = new Orchestrator({
     store,
     executor,
@@ -183,6 +228,7 @@ export async function createProjectServer(
     store,
     session,
     orchestrator,
+    executorKind,
     generatedCredential,
     async listen(port = 4173, host = '127.0.0.1'): Promise<ListenResult> {
       const address = await app.listen({ port, host });

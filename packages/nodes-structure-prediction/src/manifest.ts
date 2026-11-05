@@ -1,4 +1,4 @@
-import type { NodeManifest } from '@sflow/domain';
+import { SLURM_TASK_INPUT_FILE, type NodeManifest } from '@sflow/domain';
 
 /**
  * Production structure-prediction Node Manifest.
@@ -20,9 +20,6 @@ export const STRUCTURE_PREDICTION_PRODUCTION_VERSION = '2.0.0';
 export const STRUCTURE_PREDICTION_PRODUCTION_IMAGE =
   'ghcr.io/sflow/nodes/structure-prediction-production:2.0.0';
 
-/** Task input file written by the Slurm executor into the Task namespace. */
-export const STRUCTURE_PREDICTION_TASK_INPUT_FILE = 'task-input.json';
-
 /** Task result file read by the Slurm executor (ticket #12 protocol). */
 export const STRUCTURE_PREDICTION_RESULT_FILE = 'result.json';
 
@@ -30,7 +27,8 @@ export const STRUCTURE_PREDICTION_PRODUCTION_COMMAND: readonly string[] = [
   'sflow-structure-prediction',
   'predict',
   '--task-input',
-  STRUCTURE_PREDICTION_TASK_INPUT_FILE,
+  // Shared contract written by the Slurm Compute Executor.
+  SLURM_TASK_INPUT_FILE,
   '--result',
   STRUCTURE_PREDICTION_RESULT_FILE,
 ];

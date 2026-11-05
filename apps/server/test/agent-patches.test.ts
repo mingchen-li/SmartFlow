@@ -5,9 +5,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   defaultParameters,
   type AgentPatch,
+  type AgentPatchResultViewResponse,
   type AgentPatchWorkflowResponse,
+  type CreateRunResponse,
   type ErrorResponse,
   type FileReference,
+  type ResultViewResponse,
+  type Run,
+  type RunDetailResponse,
   type WorkflowDraft,
   type WorkflowIR,
 } from '@sflow/domain';
@@ -212,6 +217,57 @@ describe('Agent patch API', () => {
     const response = await getJson(url(`/api/workflows/${DRAFT_ID}`), context.cookie);
     expect(response.status).toBe(200);
     return readJson<WorkflowDraft>(response);
+  }
+
+  async function startRun(context: Context): Promise<Run> {
+    const response = await postJson(url(`/api/workflows/${DRAFT_ID}/runs`), {}, context.cookie);
+    expect(response.status).toBe(201);
+    return (await readJson<CreateRunResponse>(response)).run;
+  }
+
+  async function waitForRun(context: Context, runId: string): Promise<RunDetailResponse> {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const response = await getJson(url(`/api/runs/${runId}`), context.cookie);
+      expect(response.status).toBe(200);
+      const detail = await readJson<RunDetailResponse>(response);
+      if (['completed', 'failed', 'canceled'].includes(detail.run.status)) return detail;
+      if (Date.now() > deadline) throw new Error(`Run ${runId} did not settle.`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  async function getResultView(context: Context, runId: string): Promise<ResultViewResponse> {
+    const response = await getJson(url(`/api/runs/${runId}/result-view`), context.cookie);
+    expect(response.status).toBe(200);
+    return readJson<ResultViewResponse>(response);
+  }
+
+  function resultViewProposal(
+    view: ResultViewResponse,
+    operations: unknown[],
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      scope: 'result-view',
+      target: {
+        kind: 'result-view',
+        resultViewId: view.resultView.id,
+        runId: view.resultView.runId,
+      },
+      baseRevision: view.revision,
+      summary: 'Adjust the Result View',
+      operations,
+      ...overrides,
+    };
+  }
+
+  async function proposeResultView(
+    context: Context,
+    runId: string,
+    body: unknown,
+  ): Promise<Response> {
+    return postJson(url(`/api/runs/${runId}/agent/patches`), body, context.cookie);
   }
 
   async function errorBody(response: Response): Promise<ErrorResponse> {
@@ -515,6 +571,187 @@ describe('Agent patch API', () => {
     const draft = await readJson<WorkflowDraft>(saved);
     expect(draft.revision).toBe(1);
     expect(draft.layout).toMatchObject({ viewport: { x: 30, y: 40, zoom: 1.1 } });
+  });
+
+  it('proposes, applies, and reverts Result View patches against persisted revisions', async () => {
+    const context = await boot();
+    const run = await startRun(context);
+    await waitForRun(context, run.id);
+    const view = await getResultView(context, run.id);
+    expect(view.revision).toBe(1);
+    const originalBlocks = view.resultView.blocks;
+
+    const proposed = await proposeResultView(
+      context,
+      run.id,
+      resultViewProposal(view, [
+        { op: 'replace', path: '/blocks/0/title', value: 'Run logs (patched)' },
+      ]),
+    );
+    expect(proposed.status).toBe(201);
+    const patch = (await readJson<{ patch: AgentPatch }>(proposed)).patch;
+    expect(patch).toMatchObject({
+      workflowId: DRAFT_ID,
+      scope: 'result-view',
+      target: {
+        kind: 'result-view',
+        resultViewId: view.resultView.id,
+        runId: run.id,
+      },
+      baseRevision: 1,
+      resultRevision: null,
+      status: 'proposed',
+    });
+    expect(patch.validation).toEqual({
+      valid: true,
+      schemaValid: true,
+      semanticValid: true,
+      diagnostics: [],
+    });
+    expect(patch.diff[0]).toMatchObject({
+      operation: 0,
+      op: 'replace',
+      path: '/blocks/0/title',
+      before: 'Run and Task logs',
+      after: 'Run logs (patched)',
+    });
+
+    // Applying persists the patched IR with the next revision and stores the
+    // inverse operations. The strict Result View IR shape never changes.
+    const appliedResponse = await apply(context, patch.id);
+    expect(appliedResponse.status).toBe(200);
+    const applied = await readJson<AgentPatchResultViewResponse>(appliedResponse);
+    expect(applied.patch).toMatchObject({ status: 'applied', resultRevision: 2 });
+    expect(applied.revision).toBe(2);
+    expect(applied.resultView.blocks[0]!.title).toBe('Run logs (patched)');
+    expect(Object.keys(applied.resultView).sort()).toEqual([
+      'blocks',
+      'createdAt',
+      'id',
+      'runId',
+      'version',
+    ]);
+
+    const afterApply = await getResultView(context, run.id);
+    expect(afterApply.revision).toBe(2);
+    expect(afterApply.resultView).toEqual(applied.resultView);
+    // No layout or UI state entered the IR.
+    expect('layout' in (afterApply.resultView as unknown as Record<string, unknown>)).toBe(false);
+
+    // A proposal against the old revision is rejected without a rebase.
+    const staleProposal = await proposeResultView(
+      context,
+      run.id,
+      resultViewProposal(view, [
+        { op: 'replace', path: '/blocks/0/title', value: 'Stale proposal' },
+      ]),
+    );
+    expect(staleProposal.status).toBe(409);
+    expect((await errorBody(staleProposal)).error.code).toBe('STALE_BASE');
+
+    // Revert restores the exact prior blocks as a new persisted revision.
+    const revertedResponse = await revert(context, patch.id);
+    expect(revertedResponse.status).toBe(200);
+    const reverted = await readJson<AgentPatchResultViewResponse>(revertedResponse);
+    expect(reverted.patch).toMatchObject({ status: 'reverted' });
+    expect(reverted.revision).toBe(3);
+    expect(reverted.resultView.blocks).toEqual(originalBlocks);
+    const afterRevert = await getResultView(context, run.id);
+    expect(afterRevert.revision).toBe(3);
+    expect(afterRevert.resultView.blocks).toEqual(originalBlocks);
+  });
+
+  it('rejects Result View patches that violate the strict IR or binding compatibility', async () => {
+    const context = await boot();
+    const run = await startRun(context);
+    await waitForRun(context, run.id);
+    const view = await getResultView(context, run.id);
+
+    const schemaInvalid = await proposeResultView(
+      context,
+      run.id,
+      resultViewProposal(view, [{ op: 'add', path: '/layout', value: { x: 1 } }]),
+    );
+    expect(schemaInvalid.status).toBe(201);
+    const schemaPatch = (await readJson<{ patch: AgentPatch }>(schemaInvalid)).patch;
+    expect(schemaPatch.status).toBe('rejected');
+    expect(schemaPatch.validation.schemaValid).toBe(false);
+    expect(schemaPatch.validation.semanticValid).toBe(false);
+    expect(schemaPatch.validation.diagnostics.map((diagnostic) => diagnostic.code)).toContain(
+      'INVALID_RESULT_VIEW',
+    );
+
+    const bindingInvalid = await proposeResultView(
+      context,
+      run.id,
+      resultViewProposal(view, [
+        {
+          op: 'add',
+          path: '/blocks/-',
+          value: {
+            id: 'broken-widget',
+            kind: 'widget',
+            title: 'Broken widget',
+            widgetId: 'sflow.missing-widget',
+            binding: {
+              artifactSchemas: [
+                { namespace: 'sflow.binder', name: 'candidate-set', version: '1.0.0' },
+              ],
+            },
+          },
+        },
+      ]),
+    );
+    expect(bindingInvalid.status).toBe(201);
+    const bindingPatch = (await readJson<{ patch: AgentPatch }>(bindingInvalid)).patch;
+    expect(bindingPatch.status).toBe('rejected');
+    expect(bindingPatch.validation.schemaValid).toBe(true);
+    expect(bindingPatch.validation.semanticValid).toBe(false);
+    expect(bindingPatch.validation.diagnostics.map((diagnostic) => diagnostic.code)).toContain(
+      'RESULT_VIEW_BINDING',
+    );
+
+    // Neither rejected proposal can be applied and the revision is unchanged.
+    expect((await apply(context, schemaPatch.id)).status).toBe(409);
+    expect((await apply(context, bindingPatch.id)).status).toBe(409);
+    expect((await getResultView(context, run.id)).revision).toBe(1);
+  });
+
+  it('refuses to revert a Result View patch after a later patch changed the view', async () => {
+    const context = await boot();
+    const run = await startRun(context);
+    await waitForRun(context, run.id);
+    const view = await getResultView(context, run.id);
+
+    const firstProposal = await proposeResultView(
+      context,
+      run.id,
+      resultViewProposal(view, [
+        { op: 'replace', path: '/blocks/0/title', value: 'First patch' },
+      ]),
+    );
+    const first = (await readJson<{ patch: AgentPatch }>(firstProposal)).patch;
+    expect((await apply(context, first.id)).status).toBe(200);
+
+    const secondView = await getResultView(context, run.id);
+    const secondProposal = await proposeResultView(
+      context,
+      run.id,
+      resultViewProposal(secondView, [
+        { op: 'replace', path: '/blocks/0/title', value: 'Second patch' },
+      ]),
+    );
+    const second = (await readJson<{ patch: AgentPatch }>(secondProposal)).patch;
+    expect((await apply(context, second.id)).status).toBe(200);
+
+    const conflict = await revert(context, first.id);
+    expect(conflict.status).toBe(409);
+    const body = await errorBody(conflict);
+    expect(body.error.code).toBe('STALE_BASE');
+    expect(body.error.details).toMatchObject({
+      appliedRevision: 2,
+      currentRevision: 3,
+    });
   });
 
   it('validates target identity and unsupported scopes without writing a draft', async () => {

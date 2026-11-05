@@ -30,6 +30,11 @@ apps/cli           @sflow/cli           `sflow` command
 packages/domain    @sflow/domain        Zod schemas and shared types
 packages/orchestrator @sflow/orchestrator  Orchestrator + ComputeExecutor
 packages/nodes     @sflow/nodes         Built-in deterministic Binder Nodes
+packages/nodes-structure-prediction
+                   @sflow/nodes-structure-prediction
+                                        Production structure-prediction@2.0.0
+                                        replacement seam (devDependency of
+                                        apps/server for its tests)
 packages/test-support @sflow/test-support  In-memory store, fake executor, fixtures
 tests/acceptance   Playwright specs
 ```
@@ -101,8 +106,10 @@ All schemas live in `packages/domain` and are exported with inferred types.
 - `Candidate`, `CandidateSet`, `Metric`, `Provenance`, `Artifact`.
 - `ResultViewIR`: version, run id, widget blocks, schema-bound bindings.
 - `AgentPatch`: scope, target, base version, JSON Patch operations, status.
-- `EditorLayout`: node positions, viewport, panel geometry, Agent presentation.
-  This is persisted with the draft but excluded from Run snapshots.
+- `EditorLayout`: node positions, viewport, and selection only. Panel geometry,
+  maximize mode, Agent presentation (panel width, collapsed/floating state,
+  floating position and size), and the Node Library query are UI-only state:
+  they are never persisted with the draft and never enter Run snapshots.
 
 ## Orchestrator and executors
 
@@ -148,6 +155,12 @@ Custom Nodes are trusted Project code: a directory with `manifest.json` and
 `index.mjs` exporting `run`; validate the Manifest before installation. Production
 execution uses the Manifest's container environment; local execution imports the
 module in-process.
+
+`packages/nodes-structure-prediction` is a separate production replacement for
+the structure-prediction Node. It depends on `@sflow/domain` for shared
+scientific schema identities but deliberately does not depend on
+`packages/nodes`; model-specific helpers stay duplicated so the production
+implementation and the deterministic fixtures can evolve independently.
 
 ## Web workspace
 

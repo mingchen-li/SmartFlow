@@ -1,9 +1,12 @@
-import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import type {
-  NodeFailureKind,
-  NodeResources,
-  TaskState,
+import {
+  SLURM_TASK_INPUT_FILE,
+  SLURM_TASK_INPUT_VERSION,
+  createSlurmTaskInput,
+  type NodeFailureKind,
+  type NodeResources,
+  type TaskState,
 } from '@sflow/domain';
 import type {
   ComputeExecutor,
@@ -16,6 +19,12 @@ import type {
   TaskSpec,
 } from './contracts';
 import type { CommandRunner } from './command-runner';
+import {
+  loadJobRecord,
+  persistJobRecord,
+  readJobRecord,
+  readLogLines,
+} from './executor-support';
 
 export interface SlurmExecutorOptions {
   /** Absolute directory for persisted executor job state. */
@@ -66,38 +75,12 @@ const TERMINAL_STATES = new Set<TaskState>(['completed', 'failed', 'canceled']);
  * References here keeps container execution independent of the Server process
  * and makes the exact execution contract inspectable next to its outputs.
  */
-export const SLURM_TASK_INPUT_FILE = 'task-input.json';
-export const SLURM_TASK_INPUT_VERSION = 1;
-
-interface PersistedTaskInput {
-  version: typeof SLURM_TASK_INPUT_VERSION;
-  runId: string;
-  taskId: string;
-  nodeId: string;
-  attempt: number;
-  manifestId: string;
-  manifestVersion: string;
-  parameters: Record<string, unknown>;
-  fileReferences: TaskSpec['fileReferences'];
-  inputs: Record<string, unknown>;
-  resources: TaskSpec['resources'];
-}
-
-function taskInputFor(spec: TaskSpec): PersistedTaskInput {
-  return {
-    version: SLURM_TASK_INPUT_VERSION,
-    runId: spec.runId,
-    taskId: spec.taskId,
-    nodeId: spec.nodeId,
-    attempt: spec.attempt,
-    manifestId: spec.manifestId,
-    manifestVersion: spec.manifestVersion,
-    parameters: spec.parameters,
-    fileReferences: spec.fileReferences,
-    inputs: spec.inputs,
-    resources: spec.resources,
-  };
-}
+/**
+ * The Task input file and its strict schema live in `@sflow/domain` so the
+ * Server-side writer and the container-side reader share one contract. These
+ * re-exports keep the Orchestrator's existing public surface.
+ */
+export { SLURM_TASK_INPUT_FILE, SLURM_TASK_INPUT_VERSION };
 
 function quote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -248,13 +231,6 @@ function parseExitCode(value: string): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function readLogLines(path: string): string[] {
-  if (!existsSync(path)) return [];
-  const contents = readFileSync(path, 'utf8');
-  if (contents.length === 0) return [];
-  return contents.replace(/\n$/, '').split('\n');
-}
-
 /**
  * Reads the Node result contract a completed Job writes next to its outputs.
  * A missing file leaves the Task completed without a result; malformed content
@@ -338,7 +314,7 @@ export class SlurmExecutor implements ComputeExecutor {
     mkdirSync(taskDir, { recursive: true });
     writeFileSync(
       join(taskDir, SLURM_TASK_INPUT_FILE),
-      `${JSON.stringify(taskInputFor(spec), null, 2)}\n`,
+      `${JSON.stringify(createSlurmTaskInput(spec), null, 2)}\n`,
     );
 
     const scriptPath = join(taskDir, `.sflow-${spec.taskId}-attempt-${spec.attempt}.slurm.sh`);
@@ -632,23 +608,21 @@ export class SlurmExecutor implements ComputeExecutor {
   }
 
   private persist(job: PersistedSlurmJob): void {
-    mkdirSync(this.jobsDir, { recursive: true });
-    const path = join(this.jobsDir, `${job.jobId}.json`);
-    const temporary = `${path}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(job, null, 2)}\n`);
-    renameSync(temporary, path);
+    persistJobRecord(this.jobsDir, job);
   }
 
   private load(jobId: string): PersistedSlurmJob | undefined {
-    return this.read(join(this.jobsDir, `${jobId}.json`));
+    return loadJobRecord<PersistedSlurmJob>(
+      this.jobsDir,
+      jobId,
+      (record) => record.executor === 'slurm',
+    );
   }
 
   private read(path: string): PersistedSlurmJob | undefined {
-    try {
-      const parsed = JSON.parse(readFileSync(path, 'utf8')) as PersistedSlurmJob;
-      return parsed.executor === 'slurm' ? parsed : undefined;
-    } catch {
-      return undefined;
-    }
+    return readJobRecord<PersistedSlurmJob>(
+      path,
+      (record) => record.executor === 'slurm',
+    );
   }
 }

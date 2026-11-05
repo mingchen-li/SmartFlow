@@ -1,4 +1,6 @@
 import {
+  CANDIDATE_SET_SCHEMA_REF,
+  PREDICTED_STRUCTURE_SCHEMA_REF,
   CandidateSetSchema,
   NodeExecutionError,
   type CandidateSet,
@@ -14,18 +16,15 @@ import {
  * structure files. The production package owns this implementation, so model
  * behavior, packaging, and failures stay localized here instead of leaking
  * into the Orchestrator or surrounding scientific records.
+ *
+ * It intentionally does not depend on `@sflow/nodes`: shared scientific schema
+ * identities come from `@sflow/domain`, while deterministic fixtures and this
+ * production replacement keep their model-specific helpers separate so either
+ * package can evolve without coupling to the other's internals.
  */
 
-const CANDIDATE_SET_SCHEMA = {
-  namespace: 'sflow.binder',
-  name: 'candidate-set',
-  version: '1.0.0',
-};
-const PREDICTED_STRUCTURE_SCHEMA = {
-  namespace: 'sflow.binder',
-  name: 'predicted-structure',
-  version: '1.0.0',
-};
+const CANDIDATE_SET_SCHEMA = CANDIDATE_SET_SCHEMA_REF;
+const PREDICTED_STRUCTURE_SCHEMA = PREDICTED_STRUCTURE_SCHEMA_REF;
 
 /** FNV-1a over UTF-16 code units; stable across platforms and processes. */
 function hashText(value: string): number {

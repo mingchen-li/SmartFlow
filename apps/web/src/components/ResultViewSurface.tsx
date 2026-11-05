@@ -8,8 +8,10 @@ import {
   isActiveRunStatus,
   schemaKey,
   validateResultViewBindings,
+  type AgentPatch,
   type Artifact,
   type CandidateSet,
+  type JsonPatchOperation,
   type Metric,
   type ResultViewBlock,
   type ResultViewBlockEvaluation,
@@ -21,8 +23,18 @@ import {
   type Task,
   type WidgetDescriptor,
 } from '@sflow/domain';
-import { artifactDownloadUrl, getResultView, getRunEvents } from '../api';
+import {
+  applyAgentPatch,
+  artifactDownloadUrl,
+  getResultView,
+  getRunEvents,
+  proposeResultViewPatch,
+  rejectAgentPatch,
+  revertAgentPatch,
+} from '../api';
+import { eventLine, formatTime, statusTone } from '../display';
 import { useTaskLogs } from '../hooks/useTaskLogs';
+import { AgentPatchCard } from './AgentPatchCard';
 
 export interface ResultViewSurfaceProps {
   runId: string;
@@ -36,22 +48,33 @@ interface ResolvedView {
   compatibility: ResultViewCompatibilityReport;
 }
 
-function formatTime(value: string | undefined): string {
-  if (!value) return '—';
-  const time = value.includes('T') ? value.split('T')[1] ?? value : value;
-  return time.replace(/Z$/, '').slice(0, 8);
-}
-
-function eventLine(event: RunEvent): string {
-  const payload =
-    event.payload === undefined ? '' : ` ${JSON.stringify(event.payload)}`;
-  return `#${event.id} ${formatTime(event.createdAt)} ${event.type}${
-    event.taskId ? ` task=${event.taskId}` : ''
-  }${payload}`;
-}
-
 function schemaLabel(schema: { namespace: string; name: string; version: string } | undefined): string {
   return schema ? schemaKey(schema) : 'no schema';
+}
+
+function parsePatchOperations(text: string): JsonPatchOperation[] | string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    return error instanceof Error
+      ? `Operations are not valid JSON: ${error.message}`
+      : 'Operations are not valid JSON.';
+  }
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length === 0 ||
+    !parsed.every(
+      (operation) =>
+        typeof operation === 'object' &&
+        operation !== null &&
+        typeof (operation as { op?: unknown }).op === 'string' &&
+        typeof (operation as { path?: unknown }).path === 'string',
+    )
+  ) {
+    return 'Operations must be a non-empty JSON array of RFC 6902 operations.';
+  }
+  return parsed as JsonPatchOperation[];
 }
 
 function knownSchema(schema: { namespace: string; name: string; version: string } | undefined): boolean {
@@ -59,13 +82,6 @@ function knownSchema(schema: { namespace: string; name: string; version: string 
   return ['candidate-set', 'comparison-report', 'target-structure', 'predicted-structure'].includes(
     schema.name,
   );
-}
-
-function statusTone(status: string): string {
-  if (status === 'completed') return 'badge-success';
-  if (status === 'failed') return 'badge-warning';
-  if (status === 'queued' || status === 'running') return 'badge-info';
-  return 'badge-neutral';
 }
 
 function DownloadLink({
@@ -283,6 +299,13 @@ export function ResultViewSurface({ runId, onClose }: ResultViewSurfaceProps) {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [candidateSets, setCandidateSets] = useState<Record<string, CandidateSet>>({});
+  const [patches, setPatches] = useState<AgentPatch[]>([]);
+  const [patchSummary, setPatchSummary] = useState('');
+  const [patchOperations, setPatchOperations] = useState('');
+  const [patchError, setPatchError] = useState<string | null>(null);
+  const [patchErrors, setPatchErrors] = useState<Record<string, string>>({});
+  const [proposingPatch, setProposingPatch] = useState(false);
+  const [busyPatchId, setBusyPatchId] = useState<string | null>(null);
 
   const tasks = response?.data.tasks;
   const taskLogs = useTaskLogs(runId, tasks);
@@ -327,6 +350,139 @@ export function ResultViewSurface({ runId, onClose }: ResultViewSurfaceProps) {
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [onClose]);
+
+  async function proposePatch(): Promise<void> {
+    if (!response || proposingPatch) return;
+    setPatchError(null);
+    const operations = parsePatchOperations(patchOperations);
+    if (typeof operations === 'string') {
+      setPatchError(operations);
+      return;
+    }
+    const summary = patchSummary.trim();
+    if (!summary) return;
+
+    setProposingPatch(true);
+    try {
+      const { patch } = await proposeResultViewPatch(runId, {
+        scope: 'result-view',
+        target: {
+          kind: 'result-view',
+          resultViewId: response.resultView.id,
+          runId,
+        },
+        baseRevision: response.revision,
+        summary,
+        operations,
+      });
+      setPatches((current) => [patch, ...current]);
+      setPatchSummary('');
+      setPatchOperations('');
+    } catch (cause) {
+      setPatchError(
+        cause instanceof Error
+          ? cause.message
+          : 'The Result View patch could not be proposed.',
+      );
+    } finally {
+      setProposingPatch(false);
+    }
+  }
+
+  async function applyPatch(patch: AgentPatch): Promise<void> {
+    if (busyPatchId) return;
+    setBusyPatchId(patch.id);
+    setPatchErrors((current) => ({ ...current, [patch.id]: '' }));
+    try {
+      const result = await applyAgentPatch(patch.id);
+      if (!('resultView' in result)) {
+        throw new Error('The Server returned a Workflow patch to the Result View surface.');
+      }
+      setPatches((current) =>
+        current.map((candidate) =>
+          candidate.id === result.patch.id ? result.patch : candidate,
+        ),
+      );
+      setResponse((current) =>
+        current
+          ? {
+              ...current,
+              resultView: result.resultView,
+              revision: result.revision,
+            }
+          : current,
+      );
+    } catch (cause) {
+      setPatchErrors((current) => ({
+        ...current,
+        [patch.id]:
+          cause instanceof Error
+            ? cause.message
+            : 'The Result View patch could not be applied.',
+      }));
+    } finally {
+      setBusyPatchId(null);
+    }
+  }
+
+  async function revertPatch(patch: AgentPatch): Promise<void> {
+    if (busyPatchId) return;
+    setBusyPatchId(patch.id);
+    setPatchErrors((current) => ({ ...current, [patch.id]: '' }));
+    try {
+      const result = await revertAgentPatch(patch.id);
+      if (!('resultView' in result)) {
+        throw new Error('The Server returned a Workflow patch to the Result View surface.');
+      }
+      setPatches((current) =>
+        current.map((candidate) =>
+          candidate.id === result.patch.id ? result.patch : candidate,
+        ),
+      );
+      setResponse((current) =>
+        current
+          ? {
+              ...current,
+              resultView: result.resultView,
+              revision: result.revision,
+            }
+          : current,
+      );
+    } catch (cause) {
+      setPatchErrors((current) => ({
+        ...current,
+        [patch.id]:
+          cause instanceof Error
+            ? cause.message
+            : 'The Result View patch could not be reverted.',
+      }));
+    } finally {
+      setBusyPatchId(null);
+    }
+  }
+
+  async function rejectPatch(patch: AgentPatch): Promise<void> {
+    if (busyPatchId) return;
+    setBusyPatchId(patch.id);
+    try {
+      const { patch: rejected } = await rejectAgentPatch(patch.id);
+      setPatches((current) =>
+        current.map((candidate) =>
+          candidate.id === rejected.id ? rejected : candidate,
+        ),
+      );
+    } catch (cause) {
+      setPatchErrors((current) => ({
+        ...current,
+        [patch.id]:
+          cause instanceof Error
+            ? cause.message
+            : 'The Result View patch could not be rejected.',
+      }));
+    } finally {
+      setBusyPatchId(null);
+    }
+  }
 
   /**
    * The Client re-runs the same shared schema-compatibility validation the
@@ -734,7 +890,10 @@ export function ResultViewSurface({ runId, onClose }: ResultViewSurfaceProps) {
           <div className="result-view-heading">
             <h1>Result View</h1>
             <span className="muted" data-testid="result-view-run-id">
-              Run {ir.runId} · Result View {ir.version}
+              Run {ir.runId} · Result View {ir.version} · revision{' '}
+              <span data-testid="result-view-revision">
+                {response?.revision ?? '—'}
+              </span>
             </span>
           </div>
           <div className="result-view-header-meta">
@@ -755,6 +914,80 @@ export function ResultViewSurface({ runId, onClose }: ResultViewSurfaceProps) {
             </button>
           </div>
         </header>
+
+        <details
+          className="result-agent-patches"
+          data-testid="result-view-agent-patches"
+        >
+          <summary>Agent patches</summary>
+          <p className="muted">
+            Propose a typed RFC 6902 patch against this Result View. Patches are
+            validated against the strict Result View IR and this Run&apos;s data
+            before they can be applied.
+          </p>
+          <div className="agent-patch-form">
+            <label className="label" htmlFor="result-patch-summary">
+              Patch summary
+            </label>
+            <input
+              id="result-patch-summary"
+              className="input input-sm"
+              type="text"
+              value={patchSummary}
+              placeholder="Retitle the logs block"
+              onChange={(event) => setPatchSummary(event.target.value)}
+              data-testid="result-patch-summary"
+            />
+            <label className="label" htmlFor="result-patch-operations">
+              RFC 6902 operations
+            </label>
+            <textarea
+              id="result-patch-operations"
+              className="textarea agent-patch-operations"
+              value={patchOperations}
+              placeholder='[{"op":"replace","path":"/blocks/0/title","value":"Run logs (patched)"}]'
+              spellCheck={false}
+              onChange={(event) => setPatchOperations(event.target.value)}
+              data-testid="result-patch-operations"
+            />
+            <button
+              type="button"
+              className="button button-sm button-primary"
+              disabled={
+                proposingPatch ||
+                patchSummary.trim().length === 0 ||
+                patchOperations.trim().length === 0
+              }
+              aria-busy={proposingPatch}
+              onClick={() => void proposePatch()}
+              data-testid="result-patch-propose"
+            >
+              {proposingPatch ? 'Proposing…' : 'Propose patch'}
+            </button>
+            {patchError ? (
+              <p className="error-text" role="alert" data-testid="result-patch-error">
+                {patchError}
+              </p>
+            ) : null}
+          </div>
+          {patches.length === 0 ? (
+            <p className="muted" data-testid="result-patch-empty">
+              No Result View patches yet.
+            </p>
+          ) : (
+            patches.map((patch) => (
+              <AgentPatchCard
+                key={patch.id}
+                patch={patch}
+                error={patchErrors[patch.id]}
+                busy={busyPatchId === patch.id}
+                onApply={() => void applyPatch(patch)}
+                onReject={() => void rejectPatch(patch)}
+                onRevert={() => void revertPatch(patch)}
+              />
+            ))
+          )}
+        </details>
 
         <div className="result-view-body">
           {rejected.length > 0 ? (

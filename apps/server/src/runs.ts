@@ -15,8 +15,8 @@ import {
   validateResultViewBindings,
   validateWorkflow,
   type CancelRunResponse,
+  type ExecutorKind,
   type RerunTaskResponse,
-  type ResultViewIR,
   type ResultViewResponse,
   type Run,
   type RunDetailResponse,
@@ -26,16 +26,17 @@ import {
 import { OrchestratorError, type Orchestrator } from '@sflow/orchestrator';
 import { HttpError, parseOrThrow } from './errors';
 import type { NodeCatalogReader } from './node-catalog';
-import type { ProjectStore } from './store';
+import type { ProjectStore, ResultViewEntry } from './store';
 import { builtinWidgetDescriptors } from './widgets';
 
 /**
  * Builds the default Result View for a Run. The persisted IR describes ordered
  * blocks and schema-bound selectors; it carries no frontend components and is
- * independent of the data that later resolves against it.
+ * independent of the data that later resolves against it. The row revision is
+ * returned alongside the IR for Agent patch base checks.
  */
-function defaultResultView(store: ProjectStore, run: Run): ResultViewIR {
-  const existing = store.getResultView(run.id);
+function defaultResultView(store: ProjectStore, run: Run): ResultViewEntry {
+  const existing = store.getResultViewEntry(run.id);
   if (existing) return existing;
   return store.saveResultView(
     buildDefaultResultView({
@@ -44,6 +45,15 @@ function defaultResultView(store: ProjectStore, run: Run): ResultViewIR {
       widgets: builtinWidgetDescriptors,
     }),
   );
+}
+
+/** Loads a Run or answers the shared 404 used by every Run-scoped route. */
+function requireRun(store: ProjectStore, id: string): Run {
+  const run = store.getRun(id);
+  if (!run) {
+    throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
+  }
+  return run;
 }
 
 /**
@@ -60,6 +70,7 @@ export function registerRunRoutes(
   store: ProjectStore,
   orchestrator: Orchestrator,
   catalog: NodeCatalogReader,
+  executorKind: ExecutorKind,
 ): void {
   app.post('/api/workflows/:id/validate', async (request) => {
     const { id } = parseOrThrow(WorkflowParamsSchema, request.params);
@@ -119,24 +130,19 @@ export function registerRunRoutes(
 
   app.get('/api/runs/:id', async (request): Promise<RunDetailResponse> => {
     const { id } = parseOrThrow(RunParamsSchema, request.params);
-    const run = store.getRun(id);
-    if (!run) {
-      throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
-    }
+    const run = requireRun(store, id);
     return {
       run,
       tasks: store.listTasks(id),
       artifacts: store.listArtifacts(id),
       metrics: store.listMetrics(id),
+      executorKind,
     };
   });
 
   app.get('/api/runs/:id/tasks/:taskId/logs', async (request): Promise<TaskLogsResponse> => {
     const { id, taskId } = parseOrThrow(RunTaskParamsSchema, request.params);
-    const run = store.getRun(id);
-    if (!run) {
-      throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
-    }
+    requireRun(store, id);
 
     const task = store.getTask(taskId);
     if (!task || task.runId !== id) {
@@ -164,12 +170,9 @@ export function registerRunRoutes(
 
   app.get('/api/runs/:id/result-view', async (request): Promise<ResultViewResponse> => {
     const { id } = parseOrThrow(RunParamsSchema, request.params);
-    const run = store.getRun(id);
-    if (!run) {
-      throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
-    }
+    const run = requireRun(store, id);
 
-    const resultView = defaultResultView(store, run);
+    const { resultView, revision } = defaultResultView(store, run);
     const data = {
       run,
       tasks: store.listTasks(id),
@@ -180,6 +183,7 @@ export function registerRunRoutes(
 
     return {
       resultView,
+      revision,
       widgets,
       data,
       compatibility: validateResultViewBindings(resultView, data, widgets),
@@ -190,10 +194,7 @@ export function registerRunRoutes(
     '/api/runs/:id/artifacts/:artifactId/download',
     async (request, reply) => {
       const { id, artifactId } = parseOrThrow(RunArtifactParamsSchema, request.params);
-      const run = store.getRun(id);
-      if (!run) {
-        throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
-      }
+      requireRun(store, id);
 
       // Artifact lookup is scoped to the Run, so one Run can never address
       // another Run's managed output.
@@ -234,10 +235,7 @@ export function registerRunRoutes(
   app.get('/api/runs/:id/events', async (request): Promise<RunEventsResponse> => {
     const { id } = parseOrThrow(RunParamsSchema, request.params);
     const { after } = parseOrThrow(RunEventsQuerySchema, request.query);
-    const run = store.getRun(id);
-    if (!run) {
-      throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
-    }
+    requireRun(store, id);
     return { events: store.listEvents(id, after) };
   });
 
@@ -248,10 +246,7 @@ export function registerRunRoutes(
    */
   app.post('/api/runs/:id/cancel', async (request): Promise<CancelRunResponse> => {
     const { id } = parseOrThrow(RunParamsSchema, request.params);
-    const run = store.getRun(id);
-    if (!run) {
-      throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
-    }
+    requireRun(store, id);
     try {
       return { run: await orchestrator.cancelRun(id) };
     } catch (error) {
@@ -268,10 +263,7 @@ export function registerRunRoutes(
     async (request): Promise<RerunTaskResponse> => {
       const { id, taskId } = parseOrThrow(RunTaskParamsSchema, request.params);
       parseOrThrow(RerunTaskRequestSchema, request.body ?? {});
-      const run = store.getRun(id);
-      if (!run) {
-        throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
-      }
+      requireRun(store, id);
       const task = store.getTask(taskId);
       if (!task || task.runId !== id) {
         throw new HttpError(404, 'NOT_FOUND', 'Task not found.');

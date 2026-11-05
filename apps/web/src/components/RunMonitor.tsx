@@ -11,6 +11,7 @@ import type {
 } from '@sflow/domain';
 import { isActiveRunStatus } from '@sflow/domain';
 import { artifactDownloadUrl } from '../api';
+import { eventLine, formatTime, statusTone } from '../display';
 import { useTaskLogs } from '../hooks/useTaskLogs';
 
 type MonitorTab = 'overview' | 'tasks' | 'resources' | 'logs' | 'results';
@@ -50,31 +51,29 @@ export interface RunMonitorProps {
   actionPending?: boolean;
 }
 
-function statusTone(status: string | null | undefined): string {
-  if (status === 'completed') return 'badge-success';
-  if (status === 'failed') return 'badge-destructive';
-  if (status === 'queued' || status === 'running') return 'badge-info';
-  return 'badge-neutral';
-}
-
-function formatTime(value: string | undefined): string {
-  if (!value) return '—';
-  const time = value.includes('T') ? value.split('T')[1] ?? value : value;
-  return time.replace(/Z$/, '').slice(0, 8);
-}
-
 function formatBytes(size: number): string {
   if (size < 1_024) return `${size} bytes`;
   if (size < 1_048_576) return `${(size / 1_024).toFixed(1)} KiB`;
   return `${(size / 1_048_576).toFixed(1)} MiB`;
 }
 
-function eventLine(event: RunEvent): string {
-  const payload =
-    event.payload === undefined ? '' : ` ${JSON.stringify(event.payload)}`;
-  return `#${event.id} ${formatTime(event.createdAt)} ${event.type}${
-    event.taskId ? ` task=${event.taskId}` : ''
-  }${payload}`;
+/**
+ * Scheduler identity comes from the Server-selected Compute Executor; it is
+ * never inferred from the presence of a job id or hard-coded to the local
+ * executor.
+ */
+function schedulerLabel(executorKind: RunDetailResponse['executorKind'] | undefined): string {
+  if (executorKind === 'slurm') return 'Slurm';
+  if (executorKind === 'local') return 'Local';
+  return 'Executor unknown';
+}
+
+function computeExecutorLabel(
+  executorKind: RunDetailResponse['executorKind'] | undefined,
+): string {
+  if (executorKind === 'slurm') return 'Slurm Compute Executor';
+  if (executorKind === 'local') return 'Local Compute Executor';
+  return 'Waiting for Run detail…';
 }
 
 function snapshotNodeLabel(
@@ -277,8 +276,8 @@ export function RunMonitor({
                 <div className="card-value" data-testid="monitor-resource-summary">
                   {cpuReserved} CPU reserved
                 </div>
-                <div className="muted">
-                  {effectiveRun ? 'Local Compute Executor' : 'Nothing reserved.'}
+                <div className="muted" data-testid="monitor-executor">
+                  {effectiveRun ? computeExecutorLabel(detail?.executorKind) : 'Nothing reserved.'}
                 </div>
               </article>
             </div>
@@ -376,7 +375,9 @@ export function RunMonitor({
                         </td>
                         <td>{task.attempt}</td>
                         <td data-testid={`monitor-task-scheduler-${task.id}`}>
-                          {task.jobId ? `Local · ${task.jobId}` : 'Local (Slurm not configured)'}
+                          {task.jobId
+                            ? `${schedulerLabel(detail?.executorKind)} · ${task.jobId}`
+                            : `${schedulerLabel(detail?.executorKind)} · no Job yet`}
                         </td>
                         <td>{task.exitCode ?? '—'}</td>
                         <td>{formatTime(task.updatedAt)}</td>

@@ -189,6 +189,7 @@ describe('execution domain contracts', () => {
       tasks: [task],
       artifacts: [makeArtifact(provenance)],
       metrics: [makeMetric(provenance)],
+      executorKind: 'local' as const,
     };
 
     expect(RunDetailResponseSchema.parse(detail)).toEqual(detail);

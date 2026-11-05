@@ -16,9 +16,13 @@ _Avoid_: Pipeline, canvas
 The canonical protocol that represents a Workflow's execution semantics and can be consumed by the web client, CLI, Agent, and Orchestrator.
 _Avoid_: React Flow graph, UI state
 
+**Workflow Draft**:
+The mutable, autosaved working copy of a Workflow that a user edits before starting a Run. It is distinct from an immutable Workflow Version: editing a Draft never changes a Run's snapshot or an existing Workflow Version.
+_Avoid_: Workflow Version, snapshot
+
 **Workflow Version**:
 An immutable revision of a Workflow that can be used as the basis for a Run.
-_Avoid_: Draft, latest workflow
+_Avoid_: latest workflow; `draft` is not a synonym for an immutable version
 
 **Run**:
 One execution instance of a specific Workflow Version with fixed inputs, parameters, environment, and provenance.

@@ -231,10 +231,7 @@ export function nodeImplementation(
   manifest: NodeManifest,
   run: NodePackageRun,
 ): NodeImplementation {
-  return {
-    manifest,
-    run: (input, params, context) => run(input, params, context),
-  };
+  return { manifest, run };
 }
 
 /** A persisted package that no longer loads fails its Task with this message. */

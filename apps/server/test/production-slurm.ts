@@ -11,9 +11,13 @@ import type {
   NodeImplementation,
   NodeMetricValue,
   NodeRunContext,
+  SlurmTaskInput,
+} from '@sflow/domain';
+import {
+  SLURM_TASK_INPUT_FILE,
+  SlurmTaskInputSchema,
 } from '@sflow/domain';
 import type { CommandInvocation, CommandResult, CommandRunner } from '@sflow/orchestrator';
-import { SLURM_TASK_INPUT_FILE } from '@sflow/orchestrator';
 
 /**
  * Slurm scheduler stand-in that executes the Task input written by
@@ -27,19 +31,8 @@ import { SLURM_TASK_INPUT_FILE } from '@sflow/orchestrator';
  * and reports deterministic scheduler states.
  */
 
-export interface SimulatedTaskInput {
-  version: number;
-  runId: string;
-  taskId: string;
-  nodeId: string;
-  attempt: number;
-  manifestId: string;
-  manifestVersion: string;
-  parameters: Record<string, unknown>;
-  fileReferences: unknown[];
-  inputs: Record<string, unknown>;
-  resources: Record<string, unknown>;
-}
+/** Task input written by SlurmExecutor, validated by the shared domain schema. */
+export type SimulatedTaskInput = SlurmTaskInput;
 
 export interface ContainerEntrypointOptions {
   taskDir: string;
@@ -190,9 +183,9 @@ export class SimulatedSlurmScheduler implements CommandRunner {
 
     let input: SimulatedTaskInput;
     try {
-      input = JSON.parse(
-        readFileSync(join(taskDir, SLURM_TASK_INPUT_FILE), 'utf8'),
-      ) as SimulatedTaskInput;
+      input = SlurmTaskInputSchema.parse(
+        JSON.parse(readFileSync(join(taskDir, SLURM_TASK_INPUT_FILE), 'utf8')),
+      );
     } catch (error) {
       return {
         exitCode: 1,

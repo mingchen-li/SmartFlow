@@ -8,19 +8,18 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { z } from 'zod';
 import {
   NodeExecutionError,
-  NodeResourcesSchema,
-  RunFileReferenceSchema,
+  SLURM_TASK_INPUT_FILE,
+  SlurmTaskInputSchema,
   type NodeRunContext,
   type NodeRunResult,
   type SchemaRef,
+  type SlurmTaskInput,
 } from '@sflow/domain';
 import {
   STRUCTURE_PREDICTION_PRODUCTION_VERSION,
   STRUCTURE_PREDICTION_RESULT_FILE,
-  STRUCTURE_PREDICTION_TASK_INPUT_FILE,
   structurePredictionProductionManifest,
 } from './manifest';
 import { runProductionStructurePrediction } from './run';
@@ -35,36 +34,6 @@ import { runProductionStructurePrediction } from './run';
  * so the production path can be exercised with the injected CommandRunner seam
  * and without model weights, Docker, network, or Slurm.
  */
-
-export const STRUCTURE_PREDICTION_TASK_INPUT_VERSION = 1;
-
-const TaskInputSchema = z.strictObject({
-  version: z.literal(STRUCTURE_PREDICTION_TASK_INPUT_VERSION),
-  runId: z.string().min(1),
-  taskId: z.string().min(1),
-  nodeId: z.string().min(1),
-  attempt: z.number().int().min(1),
-  manifestId: z.string().min(1),
-  manifestVersion: z.string().min(1),
-  parameters: z.record(z.string(), z.unknown()),
-  fileReferences: z.array(RunFileReferenceSchema),
-  inputs: z.record(z.string(), z.unknown()),
-  resources: NodeResourcesSchema,
-});
-
-export interface StructurePredictionTaskInput {
-  version: typeof STRUCTURE_PREDICTION_TASK_INPUT_VERSION;
-  runId: string;
-  taskId: string;
-  nodeId: string;
-  attempt: number;
-  manifestId: string;
-  manifestVersion: string;
-  parameters: Record<string, unknown>;
-  fileReferences: Array<z.infer<typeof RunFileReferenceSchema>>;
-  inputs: Record<string, unknown>;
-  resources: z.infer<typeof NodeResourcesSchema>;
-}
 
 export interface ContainerArtifactFile {
   name: string;
@@ -121,7 +90,7 @@ function isInside(parent: string, candidate: string): boolean {
   return rel.length > 0 && !rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel);
 }
 
-function readTaskInput(path: string): StructurePredictionTaskInput {
+function readTaskInput(path: string): SlurmTaskInput {
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, 'utf8'));
@@ -132,7 +101,7 @@ function readTaskInput(path: string): StructurePredictionTaskInput {
     );
   }
 
-  const parsed = TaskInputSchema.safeParse(raw);
+  const parsed = SlurmTaskInputSchema.safeParse(raw);
   if (!parsed.success) {
     throw new NodeExecutionError(
       'validation',
@@ -257,7 +226,7 @@ export async function runProductionStructurePredictionContainer(
   log(
     `structure-prediction-production run=${input.runId} task=${input.taskId} node=${input.nodeId} attempt=${input.attempt}`,
   );
-  log(`structure-prediction-production task-input=${STRUCTURE_PREDICTION_TASK_INPUT_FILE}`);
+  log(`structure-prediction-production task-input=${SLURM_TASK_INPUT_FILE}`);
 
   const context: NodeRunContext = {
     runId: input.runId,

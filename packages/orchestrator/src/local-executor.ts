@@ -5,7 +5,6 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -31,6 +30,13 @@ import type {
   SubmitResult,
   TaskSpec,
 } from './contracts';
+import {
+  loadJobRecord,
+  persistJobRecord,
+  readJobRecord,
+  readLogLines,
+  waitForAbortableDelay,
+} from './executor-support';
 
 export interface LocalExecutorOptions {
   /** Project root; path-backed inputs are read from here and never escaped. */
@@ -76,13 +82,6 @@ const TERMINAL_STATES = new Set<PollResult['state']>(['completed', 'failed', 'ca
 function isInside(parent: string, candidate: string): boolean {
   const rel = relative(parent, candidate);
   return rel.length > 0 && !rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel);
-}
-
-function readLogLines(path: string): string[] {
-  if (!existsSync(path)) return [];
-  const contents = readFileSync(path, 'utf8');
-  if (contents.length === 0) return [];
-  return contents.replace(/\n$/, '').split('\n');
 }
 
 /**
@@ -224,7 +223,7 @@ export class LocalExecutor implements ComputeExecutor {
       log(`node=${implementation.manifest.id} attempt=${spec.attempt}`);
       log('state=running');
 
-      if (!(await this.pause(this.executionDelayMs, signal))) {
+      if (!(await waitForAbortableDelay(this.executionDelayMs, signal))) {
         this.finish(job, { state: 'canceled', exitCode: 130 }, log);
         return;
       }
@@ -434,25 +433,6 @@ export class LocalExecutor implements ComputeExecutor {
     this.persist(job);
   }
 
-  /** Abortable pause; resolves false when the signal aborts before the delay ends. */
-  private pause(milliseconds: number, signal: AbortSignal): Promise<boolean> {
-    if (milliseconds <= 0) return Promise.resolve(!signal.aborted);
-    if (signal.aborted) return Promise.resolve(false);
-
-    return new Promise((resolve) => {
-      let timer: ReturnType<typeof setTimeout>;
-      const onAbort = (): void => {
-        clearTimeout(timer);
-        resolve(false);
-      };
-      timer = setTimeout(() => {
-        signal.removeEventListener('abort', onAbort);
-        resolve(true);
-      }, milliseconds);
-      signal.addEventListener('abort', onAbort, { once: true });
-    });
-  }
-
   private appendLog(path: string, line: string): void {
     mkdirSync(dirname(path), { recursive: true });
     appendFileSync(path, `${line}\n`);
@@ -470,25 +450,23 @@ export class LocalExecutor implements ComputeExecutor {
   }
 
   private persist(job: PersistedJob): void {
-    mkdirSync(this.jobsDir, { recursive: true });
-    const path = join(this.jobsDir, `${job.jobId}.json`);
-    const temporary = `${path}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(job, null, 2)}\n`);
-    renameSync(temporary, path);
+    persistJobRecord(this.jobsDir, job);
   }
 
   private load(jobId: string): PersistedJob | undefined {
-    return this.read(join(this.jobsDir, `${jobId}.json`));
+    return loadJobRecord<PersistedJob>(
+      this.jobsDir,
+      jobId,
+      (record) => record.executor === undefined || record.executor === 'local',
+    );
   }
 
   private read(path: string): PersistedJob | undefined {
-    try {
-      const parsed = JSON.parse(readFileSync(path, 'utf8')) as PersistedJob;
-      // Records written before the discriminator existed are local jobs. Slurm
-      // records in a shared jobs directory must never be adopted here.
-      return parsed.executor === undefined || parsed.executor === 'local' ? parsed : undefined;
-    } catch {
-      return undefined;
-    }
+    // Records written before the discriminator existed are local jobs. Slurm
+    // records in a shared jobs directory must never be adopted here.
+    return readJobRecord<PersistedJob>(
+      path,
+      (record) => record.executor === undefined || record.executor === 'local',
+    );
   }
 }

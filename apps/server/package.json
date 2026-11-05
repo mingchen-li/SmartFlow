@@ -13,5 +13,9 @@
     "@sflow/domain": "workspace:*",
     "fastify": "^5.12.8",
     "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.2",
+    "ws": "^8.22.1"
   }
 }

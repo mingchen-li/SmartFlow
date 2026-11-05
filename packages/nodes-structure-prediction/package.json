@@ -1,0 +1,16 @@
+{
+  "name": "@sflow/nodes-structure-prediction",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@sflow/domain": "workspace:*",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@sflow/nodes": "workspace:*"
+  }
+}

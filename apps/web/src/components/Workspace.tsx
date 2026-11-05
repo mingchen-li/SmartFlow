@@ -1,6 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { Project } from '@sflow/domain';
-import { ApiError, getWorkflow, saveWorkflow } from '../api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { FileReference, Project } from '@sflow/domain';
+import {
+  ApiError,
+  getWorkflow,
+  listFileReferences,
+  registerFileReference,
+  saveWorkflow,
+} from '../api';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { useLayoutStore } from '../store/layout';
 import { AgentPanel } from './AgentPanel';
@@ -42,10 +48,13 @@ export interface WorkspaceProps {
 export function Workspace({ project, onSignedOut }: WorkspaceProps) {
   const [activeSection, setActiveSection] = useState<WorkspaceSection>('workflows');
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+  const [selectedReference, setSelectedReference] = useState<FileReference | null>(null);
+  const [fileReferences, setFileReferences] = useState<FileReference[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [draft, setDraft] = useState<DraftState>(EMPTY_DRAFT);
   const [saveState, setSaveState] = useState<SaveState>('idle');
+  const selectedPathRef = useRef<string | null>(null);
 
   const agentWidth = useLayoutStore((state) => state.agentWidth);
   const explorerCollapsed = useLayoutStore((state) => state.explorerCollapsed);
@@ -94,6 +103,49 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
         notify('The Workflow draft could not be loaded.');
       });
   }, [notify]);
+
+  useEffect(() => {
+    listFileReferences()
+      .then((response) => {
+        setFileReferences((current) => {
+          const byPath = new Map(current.map((reference) => [reference.path, reference]));
+          for (const reference of response.references) {
+            if (!byPath.has(reference.path)) byPath.set(reference.path, reference);
+          }
+          return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
+        });
+      })
+      .catch(() => notify('File References could not be loaded.'));
+  }, [notify]);
+
+  /**
+   * Selecting a file records a path-backed File Reference. The source bytes
+   * stay in the Project filesystem; only the location is registered.
+   */
+  const selectFile = useCallback(
+    (path: string) => {
+      selectedPathRef.current = path;
+      setSelectedFilePath(path);
+
+      registerFileReference(path)
+        .then((reference) => {
+          if (selectedPathRef.current !== path) return;
+          setSelectedReference(reference);
+          setFileReferences((current) => {
+            const next = current.filter(
+              (item) => item.id !== reference.id && item.path !== reference.path,
+            );
+            return [...next, reference].sort((a, b) => a.path.localeCompare(b.path));
+          });
+        })
+        .catch(() => {
+          if (selectedPathRef.current !== path) return;
+          setSelectedReference(null);
+          notify('The File Reference could not be registered.');
+        });
+    },
+    [notify],
+  );
 
   const save = useCallback(async () => {
     setSaveState('saving');
@@ -168,7 +220,7 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
           <>
             <FileExplorer
               selectedPath={selectedFilePath}
-              onSelect={setSelectedFilePath}
+              onSelect={selectFile}
               onCollapse={toggleExplorer}
             />
             <ResizeHandle
@@ -191,6 +243,8 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
               <SectionSurface
                 section={activeSection}
                 selectedFilePath={selectedFilePath}
+                selectedReference={selectedReference}
+                fileReferences={fileReferences}
                 onNavigate={setActiveSection}
               />
             )}

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { NodeEnvironmentSchema } from './workflow';
+import { NodeEnvironmentSchema, type RetryPolicy } from './workflow';
 import { RunFileReferenceSchema, RunSchema } from './run';
 
 /**
@@ -17,17 +17,58 @@ export type TaskState = z.infer<typeof TaskStateSchema>;
 
 export const TASK_TERMINAL_STATES: readonly TaskState[] = ['completed', 'failed', 'canceled'];
 
+/**
+ * How an executor classified a Node failure. Only `transient`, `timeout`, and
+ * `exit-code` are ever eligible for a Manifest retry; parameter and validation
+ * errors are deterministic and must never be repeated.
+ */
+export const NODE_FAILURE_KINDS = [
+  'parameter',
+  'validation',
+  'transient',
+  'timeout',
+  'exit-code',
+  'unknown',
+] as const;
+export const NodeFailureKindSchema = z.enum(NODE_FAILURE_KINDS);
+export type NodeFailureKind = z.infer<typeof NodeFailureKindSchema>;
+
+/** Failure kinds a Manifest RetryPolicy may opt into. */
+export const RETRYABLE_FAILURE_KINDS: readonly NodeFailureKind[] = [
+  'transient',
+  'timeout',
+  'exit-code',
+];
+
+/**
+ * Decides whether another Task attempt may be scheduled for a failed attempt.
+ * `attempt` is one-based and counts the failed attempt. Parameter and
+ * validation failures never match a RetryPolicy, even when the policy lists a
+ * retryable kind with the same name.
+ */
+export function shouldRetryTask(
+  retry: RetryPolicy,
+  attempt: number,
+  failureKind: NodeFailureKind,
+): boolean {
+  if (attempt >= retry.maxAttempts) return false;
+  if (!RETRYABLE_FAILURE_KINDS.includes(failureKind)) return false;
+  return retry.retryOn.includes(failureKind as 'transient' | 'timeout' | 'exit-code');
+}
+
 export const RUN_EVENT_TYPES = [
   'run.created',
   'run.started',
   'run.completed',
   'run.failed',
   'run.canceled',
+  'run.rerun',
   'task.queued',
   'task.running',
   'task.completed',
   'task.failed',
   'task.canceled',
+  'task.retry.scheduled',
   'artifact.recorded',
   'metric.recorded',
 ] as const;
@@ -146,6 +187,8 @@ export const TaskSchema = z.strictObject({
   attempt: z.number().int().min(1),
   state: TaskStateSchema,
   jobId: z.string().min(1).optional(),
+  /** Executor classification of the failure that ended this attempt. */
+  failureKind: NodeFailureKindSchema.optional(),
   logsAvailable: z.boolean(),
   logsPath: z.string().min(1).optional(),
   exitCode: z.number().int().optional(),
@@ -180,6 +223,26 @@ export const RunTaskParamsSchema = z.object({
   taskId: z.string().min(1).max(200),
 });
 export type RunTaskParams = z.infer<typeof RunTaskParamsSchema>;
+
+/**
+ * Cancellation is idempotent: canceling an already terminal Run returns its
+ * current state unchanged, so completed science is never rewritten.
+ */
+export const CancelRunResponseSchema = z.strictObject({ run: RunSchema });
+export type CancelRunResponse = z.infer<typeof CancelRunResponseSchema>;
+
+export const RerunTaskRequestSchema = z.strictObject({});
+export type RerunTaskRequest = z.infer<typeof RerunTaskRequestSchema>;
+
+/**
+ * An explicit rerun creates a fresh Task attempt for the Node while the
+ * original failed or canceled attempt stays visible as history.
+ */
+export const RerunTaskResponseSchema = z.strictObject({
+  run: RunSchema,
+  task: TaskSchema,
+});
+export type RerunTaskResponse = z.infer<typeof RerunTaskResponseSchema>;
 
 export const TaskLogsResponseSchema = z.strictObject({
   runId: z.string().min(1),

@@ -5,6 +5,7 @@ import fastifyCookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
+import type { NodeImplementation, NodeRegistry } from '@sflow/domain';
 import { createBuiltinNodeRegistry } from '@sflow/nodes';
 import { LocalExecutor, Orchestrator } from '@sflow/orchestrator';
 import { registerAuthGuard, registerAuthRoutes } from './auth';
@@ -29,6 +30,52 @@ export interface CreateProjectServerOptions {
    * `SFLOW_EXECUTOR_DELAY_MS` supplies the same value to a spawned Server.
    */
   executorDelayMs?: number;
+  /**
+   * Replaces the implementation of one or more built-in Manifests by
+   * `id@version`. External tests inject deterministic failures this way; the
+   * Manifest catalog and Run snapshots still use the declared Node contracts.
+   */
+  nodeImplementations?: readonly NodeImplementation[];
+  /**
+   * Replaces the retry backoff wait. External tests use it to avoid real
+   * delays; production keeps the Manifest-declared timing.
+   */
+  retryWait?: (milliseconds: number, signal: AbortSignal) => Promise<boolean>;
+}
+
+function registryKey(manifest: { id: string; version: string }): string {
+  return `${manifest.id}@${manifest.version}`;
+}
+
+/** Built-in Node registry with optional deterministic test overrides. */
+function createNodeRegistry(
+  overrides: readonly NodeImplementation[] = [],
+): NodeRegistry {
+  const base = createBuiltinNodeRegistry();
+  if (overrides.length === 0) return base;
+
+  const overridesByKey = new Map(
+    overrides.map((implementation) => [
+      registryKey(implementation.manifest),
+      implementation,
+    ]),
+  );
+  return {
+    get: (manifestId, manifestVersion) =>
+      overridesByKey.get(`${manifestId}@${manifestVersion}`) ??
+      base.get(manifestId, manifestVersion),
+    list: () => {
+      // Replacing a Manifest keeps its catalog position; new Manifests append.
+      const merged = new Map<string, NodeImplementation>();
+      for (const implementation of base.list()) {
+        merged.set(registryKey(implementation.manifest), implementation);
+      }
+      for (const implementation of overrides) {
+        merged.set(registryKey(implementation.manifest), implementation);
+      }
+      return [...merged.values()];
+    },
+  };
 }
 
 function executorDelayFromEnvironment(): number {
@@ -69,13 +116,18 @@ export async function createProjectServer(
   const store = new ProjectStore(projectRoot);
   const { generatedCredential } = store.initializeCredential(options.credential);
   const session = new SessionService(store.getSessionSecret());
+  const registry = createNodeRegistry(options.nodeImplementations);
   const executor = new LocalExecutor({
     projectRoot,
     jobsDir: join(store.sflowDir, 'executor'),
-    registry: createBuiltinNodeRegistry(),
+    registry,
     executionDelayMs: options.executorDelayMs ?? executorDelayFromEnvironment(),
   });
-  const orchestrator = new Orchestrator({ store, executor });
+  const orchestrator = new Orchestrator({
+    store,
+    executor,
+    ...(options.retryWait ? { retryWait: options.retryWait } : {}),
+  });
   const app = Fastify({ logger: options.logger ?? false });
 
   // Install the error and not-found handlers before routes register so every
@@ -87,9 +139,9 @@ export async function createProjectServer(
 
   registerAuthGuard(app, session);
   registerAuthRoutes(app, store, session);
-  registerNodeRoutes(app);
+  registerNodeRoutes(app, registry);
   registerWorkspaceRoutes(app, store);
-  registerRunRoutes(app, store, orchestrator);
+  registerRunRoutes(app, store, orchestrator, registry);
   registerAgentPatchRoutes(app, store);
   registerTerminalRoute(app, store);
   registerPages(app, session, webDist);

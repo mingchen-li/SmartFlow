@@ -3,11 +3,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type {
-  NodeImplementation,
-  NodeManifest,
-  NodeRegistry,
-  NodeRunContext,
+import {
+  NodeExecutionError,
+  type NodeImplementation,
+  type NodeManifest,
+  type NodeRegistry,
+  type NodeRunContext,
 } from '@sflow/domain';
 import {
   LocalExecutor,
@@ -242,6 +243,109 @@ describe('LocalExecutor contract', () => {
     expect(result.state).toBe('canceled');
     expect(result.exitCode).toBe(130);
     expect((await executor.poll(jobId)).state).toBe('canceled');
+  });
+
+  it('persists the Node failure classification for retry decisions', async () => {
+    const { projectRoot, jobsDir, taskDir } = makeRoot();
+    const failing: NodeImplementation = {
+      manifest: testManifest,
+      run() {
+        throw new NodeExecutionError('transient', 'the scheduler connection dropped');
+      },
+    };
+    const executor = new LocalExecutor({
+      projectRoot,
+      jobsDir,
+      registry: registryFor(failing),
+    });
+
+    const { jobId } = await executor.submit(specFor(taskDir));
+    const result = await waitForTerminal(executor, jobId);
+    expect(result).toMatchObject({
+      state: 'failed',
+      exitCode: 1,
+      error: 'the scheduler connection dropped',
+      failureKind: 'transient',
+    });
+
+    // Failure classification is durable so restart reconciliation can decide
+    // whether the Manifest policy allows another attempt.
+    const restarted = new LocalExecutor({
+      projectRoot,
+      jobsDir,
+      registry: registryFor(failing),
+    });
+    expect((await restarted.reconcile('run-1')).jobs[0]).toMatchObject({
+      jobId,
+      state: 'failed',
+      failureKind: 'transient',
+    });
+  });
+
+  it('treats parameter errors as non-retryable and unclassified process exits as exit-code failures', async () => {
+    const { projectRoot, jobsDir, taskDir } = makeRoot();
+    const parameterFailure: NodeImplementation = {
+      manifest: testManifest,
+      run() {
+        throw new NodeExecutionError('parameter', 'Parameter "seed" must be an integer.');
+      },
+    };
+    const executor = new LocalExecutor({
+      projectRoot,
+      jobsDir,
+      registry: registryFor(parameterFailure),
+    });
+    const parameter = await waitForTerminal(
+      executor,
+      (await executor.submit(specFor(taskDir))).jobId,
+    );
+    expect(parameter).toMatchObject({
+      state: 'failed',
+      failureKind: 'parameter',
+    });
+
+    const { taskDir: secondTaskDir } = makeRoot();
+    const unclassified: NodeImplementation = {
+      manifest: testManifest,
+      run() {
+        throw new Error('the process exited unexpectedly');
+      },
+    };
+    const secondExecutor = new LocalExecutor({
+      projectRoot,
+      jobsDir,
+      registry: registryFor(unclassified),
+    });
+    const exit = await waitForTerminal(
+      secondExecutor,
+      (await secondExecutor.submit(specFor(secondTaskDir))).jobId,
+    );
+    expect(exit).toMatchObject({ state: 'failed', failureKind: 'exit-code' });
+  });
+
+  it('classifies an executor contract violation as a validation failure', async () => {
+    const { projectRoot, jobsDir, taskDir } = makeRoot();
+    const undeclared: NodeImplementation = {
+      manifest: testManifest,
+      run() {
+        return { outputs: [{ portId: 'not-declared', value: 1 }] };
+      },
+    };
+    const executor = new LocalExecutor({
+      projectRoot,
+      jobsDir,
+      registry: registryFor(undeclared),
+    });
+
+    const result = await waitForTerminal(
+      executor,
+      (await executor.submit(specFor(taskDir))).jobId,
+    );
+    expect(result).toMatchObject({
+      state: 'failed',
+      failureKind: 'validation',
+    });
+    expect(result.error).toContain('not-declared');
   });
 
   it('rejects attempts to overwrite a Task output file', async () => {

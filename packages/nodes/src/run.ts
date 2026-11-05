@@ -1,5 +1,6 @@
 import {
   CandidateSetSchema,
+  NodeExecutionError,
   ComparisonReportSchema,
   TargetStructureSchema,
   type CandidateSet,
@@ -97,7 +98,7 @@ function requireNumber(
 ): number {
   const value = parameters[id] ?? fallback;
   if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new Error(`Parameter "${id}" must be a number.`);
+    throw new NodeExecutionError('parameter', `Parameter "${id}" must be a number.`);
   }
   return value;
 }
@@ -109,7 +110,7 @@ function requireString(
 ): string {
   const value = parameters[id] ?? fallback;
   if (typeof value !== 'string') {
-    throw new Error(`Parameter "${id}" must be text.`);
+    throw new NodeExecutionError('parameter', `Parameter "${id}" must be text.`);
   }
   return value;
 }
@@ -122,7 +123,7 @@ function optionalBoolean(parameters: Record<string, unknown>, id: string, fallba
 function asCandidateSet(value: unknown, portName: string): CandidateSet {
   const parsed = CandidateSetSchema.safeParse(value);
   if (!parsed.success) {
-    throw new Error(`Input "${portName}" is not a valid CandidateSet.`);
+    throw new NodeExecutionError('validation', `Input "${portName}" is not a valid CandidateSet.`);
   }
   return parsed.data;
 }
@@ -197,15 +198,24 @@ export function runTargetInput(
     | { fileReferenceId?: unknown; path?: unknown; name?: unknown }
     | undefined;
   if (!targetFile || typeof targetFile.path !== 'string' || targetFile.path.length === 0) {
-    throw new Error('Parameter "targetFile" must select a Project File Reference.');
+    throw new NodeExecutionError(
+      'parameter',
+      'Parameter "targetFile" must select a Project File Reference.',
+    );
   }
   if (typeof targetFile.fileReferenceId !== 'string') {
-    throw new Error('Parameter "targetFile" must carry a File Reference id.');
+    throw new NodeExecutionError(
+      'parameter',
+      'Parameter "targetFile" must carry a File Reference id.',
+    );
   }
 
   const contents = context.readProjectFile(targetFile.path);
   if (contents === undefined) {
-    throw new Error(`Target file "${targetFile.path}" could not be read from the Project.`);
+    throw new NodeExecutionError(
+      'validation',
+      `Target file "${targetFile.path}" could not be read from the Project.`,
+    );
   }
 
   const chain = requireString(parameters, 'targetChain', 'A');
@@ -256,11 +266,14 @@ export function runCandidateGeneration(
 ): NodeRunResult {
   const numCandidates = requireNumber(parameters, 'numCandidates', 100);
   if (!Number.isInteger(numCandidates) || numCandidates < 1) {
-    throw new Error('Parameter "numCandidates" must be a positive integer.');
+    throw new NodeExecutionError(
+      'parameter',
+      'Parameter "numCandidates" must be a positive integer.',
+    );
   }
   const seed = requireNumber(parameters, 'seed', 42);
   if (!Number.isInteger(seed)) {
-    throw new Error('Parameter "seed" must be an integer.');
+    throw new NodeExecutionError('parameter', 'Parameter "seed" must be an integer.');
   }
   const strategy = requireString(parameters, 'strategy', 'random');
   const useHotspots = optionalBoolean(parameters, 'useTargetHotspots', true);
@@ -345,11 +358,17 @@ export function runSequenceDesign(
   const temperature = requireNumber(parameters, 'temperature', 0.7);
   const numDesigns = requireNumber(parameters, 'numDesigns', 50);
   if (!Number.isInteger(numDesigns) || numDesigns < 1) {
-    throw new Error('Parameter "numDesigns" must be a positive integer.');
+    throw new NodeExecutionError(
+      'parameter',
+      'Parameter "numDesigns" must be a positive integer.',
+    );
   }
   const randomSeed = requireNumber(parameters, 'randomSeed', 7);
   if (!Number.isInteger(randomSeed)) {
-    throw new Error('Parameter "randomSeed" must be an integer.');
+    throw new NodeExecutionError(
+      'parameter',
+      'Parameter "randomSeed" must be an integer.',
+    );
   }
   const trimTerminalTags = optionalBoolean(parameters, 'trimTerminalTags', true);
 
@@ -437,7 +456,7 @@ export function runStructurePrediction(
   const predictor = requireString(parameters, 'predictor', 'esmfold2');
   const seed = requireNumber(parameters, 'seed', 1);
   if (!Number.isInteger(seed)) {
-    throw new Error('Parameter "seed" must be an integer.');
+    throw new NodeExecutionError('parameter', 'Parameter "seed" must be an integer.');
   }
 
   const scores: CandidateSet['scores'] = [];
@@ -576,7 +595,7 @@ export function runCandidateComparison(
   const scored = asCandidateSet(input.scored, 'scored');
   const topN = requireNumber(parameters, 'topN', 10);
   if (!Number.isInteger(topN) || topN < 1) {
-    throw new Error('Parameter "topN" must be a positive integer.');
+    throw new NodeExecutionError('parameter', 'Parameter "topN" must be a positive integer.');
   }
   const rankingMetric = requireString(parameters, 'rankingMetric', 'plddt');
   const deduplicate = optionalBoolean(parameters, 'deduplicate', true);

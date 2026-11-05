@@ -25,8 +25,20 @@ One execution instance of a specific Workflow Version with fixed inputs, paramet
 _Avoid_: Job, session
 
 **Task**:
-One scheduled execution of an atomic Node within a Run.
+One scheduled execution attempt of an atomic Node within a Run. Each attempt has its own identity, logs, and outcome; a retry or explicit rerun creates a new Task while earlier attempts remain inspectable history.
 _Avoid_: Step, process
+
+**Retry**:
+A new Task attempt the Orchestrator schedules automatically after a retryable failure, according to the Node Manifest's immutable RetryPolicy. Parameter and validation errors are never retried.
+_Avoid_: Loop iteration, rerun
+
+**Rerun**:
+An explicit user request to execute a failed or canceled Task again as a new attempt, reusing completed upstream work and replanning downstream work as needed.
+_Avoid_: Retry, restart
+
+**Cancellation**:
+Ending a Run without rewriting completed Tasks or their scientific records; queued work stops before starting and running executor jobs are asked to stop.
+_Avoid_: Abort, rollback
 
 **Iteration**:
 One cycle of a Loop, with its own inputs, outputs, metrics, and termination state.

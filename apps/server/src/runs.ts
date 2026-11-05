@@ -4,18 +4,21 @@ import type { FastifyInstance } from 'fastify';
 import {
   BINDER_REQUIRED_OUTPUTS,
   CreateRunRequestSchema,
+  RerunTaskRequestSchema,
   RunEventsQuerySchema,
   RunParamsSchema,
   RunTaskParamsSchema,
   WorkflowParamsSchema,
   createRunSnapshot,
   validateWorkflow,
+  type CancelRunResponse,
+  type NodeRegistry,
+  type RerunTaskResponse,
   type RunDetailResponse,
   type RunEventsResponse,
   type TaskLogsResponse,
 } from '@sflow/domain';
-import { builtinManifests } from '@sflow/nodes';
-import type { Orchestrator } from '@sflow/orchestrator';
+import { OrchestratorError, type Orchestrator } from '@sflow/orchestrator';
 import { HttpError, parseOrThrow } from './errors';
 import type { ProjectStore } from './store';
 
@@ -32,7 +35,10 @@ export function registerRunRoutes(
   app: FastifyInstance,
   store: ProjectStore,
   orchestrator: Orchestrator,
+  registry: NodeRegistry,
 ): void {
+  const manifests = registry.list().map((implementation) => implementation.manifest);
+
   app.post('/api/workflows/:id/validate', async (request) => {
     const { id } = parseOrThrow(WorkflowParamsSchema, request.params);
     const draft = store.getDraft(id);
@@ -40,7 +46,7 @@ export function registerRunRoutes(
       throw new HttpError(404, 'NOT_FOUND', 'Workflow draft not found.');
     }
 
-    return validateWorkflow(draft.workflow, builtinManifests, {
+    return validateWorkflow(draft.workflow, manifests, {
       requiredOutputs: BINDER_REQUIRED_OUTPUTS,
     });
   });
@@ -54,7 +60,7 @@ export function registerRunRoutes(
       throw new HttpError(404, 'NOT_FOUND', 'Workflow draft not found.');
     }
 
-    const validation = validateWorkflow(draft.workflow, builtinManifests, {
+    const validation = validateWorkflow(draft.workflow, manifests, {
       requiredOutputs: BINDER_REQUIRED_OUTPUTS,
     });
     if (!validation.valid) {
@@ -68,7 +74,7 @@ export function registerRunRoutes(
 
     const run = store.createRun({
       workflowId: id,
-      snapshot: createRunSnapshot(draft.workflow, builtinManifests),
+      snapshot: createRunSnapshot(draft.workflow, manifests),
     });
 
     // Execution is owned by the Orchestrator and stays observable after this
@@ -135,4 +141,55 @@ export function registerRunRoutes(
     }
     return { events: store.listEvents(id, after) };
   });
+
+  /**
+   * Cancels queued work, requests running executor jobs to stop, and closes
+   * the Run as canceled. Safe to call on a terminal Run: the response is the
+   * unchanged Run and no history is rewritten.
+   */
+  app.post('/api/runs/:id/cancel', async (request): Promise<CancelRunResponse> => {
+    const { id } = parseOrThrow(RunParamsSchema, request.params);
+    const run = store.getRun(id);
+    if (!run) {
+      throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
+    }
+    try {
+      return { run: await orchestrator.cancelRun(id) };
+    } catch (error) {
+      throw toHttpError(error);
+    }
+  });
+
+  /**
+   * Explicitly reruns a failed or canceled Task attempt. The new attempt is
+   * queued and the Run resumes; the original attempt and logs stay visible.
+   */
+  app.post(
+    '/api/runs/:id/tasks/:taskId/rerun',
+    async (request): Promise<RerunTaskResponse> => {
+      const { id, taskId } = parseOrThrow(RunTaskParamsSchema, request.params);
+      parseOrThrow(RerunTaskRequestSchema, request.body ?? {});
+      const run = store.getRun(id);
+      if (!run) {
+        throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
+      }
+      const task = store.getTask(taskId);
+      if (!task || task.runId !== id) {
+        throw new HttpError(404, 'NOT_FOUND', 'Task not found.');
+      }
+      try {
+        const result = await orchestrator.rerunTask(id, taskId);
+        return { run: result.run, task: result.task };
+      } catch (error) {
+        throw toHttpError(error);
+      }
+    },
+  );
+}
+
+function toHttpError(error: unknown): HttpError {
+  if (error instanceof OrchestratorError) {
+    return new HttpError(409, error.code, error.message);
+  }
+  throw error;
 }

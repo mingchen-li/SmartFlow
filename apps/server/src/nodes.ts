@@ -1,6 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { NodeManifestParamsSchema } from '@sflow/domain';
-import { builtinManifestById, builtinManifests } from '@sflow/nodes';
+import { NodeManifestParamsSchema, type NodeRegistry } from '@sflow/domain';
 import { HttpError, parseOrThrow } from './errors';
 
 /**
@@ -8,12 +7,14 @@ import { HttpError, parseOrThrow } from './errors';
  * declarations: categories, search text, ports, generated parameter forms,
  * resources, and Metric metadata. Model execution is not exposed here.
  */
-export function registerNodeRoutes(app: FastifyInstance): void {
-  app.get('/api/nodes', async () => ({ nodes: builtinManifests }));
+export function registerNodeRoutes(app: FastifyInstance, registry: NodeRegistry): void {
+  const manifests = registry.list().map((implementation) => implementation.manifest);
+
+  app.get('/api/nodes', async () => ({ nodes: manifests }));
 
   app.get('/api/nodes/:id', async (request) => {
     const { id } = parseOrThrow(NodeManifestParamsSchema, request.params);
-    const manifest = builtinManifestById(id);
+    const manifest = manifests.find((candidate) => candidate.id === id);
     if (!manifest) {
       throw new HttpError(404, 'NOT_FOUND', 'Node Manifest not found.');
     }

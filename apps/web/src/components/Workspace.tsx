@@ -9,17 +9,22 @@ import {
   type NodeManifest,
   type Project,
   type Run,
+  type RunDetailResponse,
+  type Task,
   type ValidateWorkflowResponse,
   type ValidationDiagnostic,
 } from '@sflow/domain';
 import {
   ApiError,
+  cancelRun,
   createRun,
+  getRun,
   getWorkflow,
   listFileReferences,
   listNodeManifests,
   listRuns,
   registerFileReference,
+  rerunTask,
   validateWorkflowDraft,
 } from '../api';
 import { useDraftAutosave } from '../editor/useDraftAutosave';
@@ -66,7 +71,10 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
   const [validating, setValidating] = useState(false);
   const [startingRun, setStartingRun] = useState(false);
   const [latestRun, setLatestRun] = useState<Run | null>(null);
+  const [runDetail, setRunDetail] = useState<RunDetailResponse | null>(null);
+  const [runActionPending, setRunActionPending] = useState(false);
   const selectedPathRef = useRef<string | null>(null);
+  const detailRunIdRef = useRef<string | null>(null);
   const wasMaximizedRef = useRef(false);
 
   const draftName = useEditorStore((state) => state.draftName);
@@ -223,6 +231,47 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
     };
   }, [notify]);
 
+  /**
+   * While a Run is active, poll its stored detail so Task attempts, retries,
+   * and cancellation are observable. The first poll is delayed so the
+   * just-created `queued` Run is what the monitor reports immediately.
+   */
+  useEffect(() => {
+    if (!latestRun) {
+      detailRunIdRef.current = null;
+      setRunDetail(null);
+      return;
+    }
+
+    let cancelled = false;
+    let timer: number | undefined;
+    if (detailRunIdRef.current !== latestRun.id) {
+      detailRunIdRef.current = latestRun.id;
+      setRunDetail(null);
+    }
+
+    const load = (): void => {
+      getRun(latestRun.id)
+        .then((detail) => {
+          if (cancelled) return;
+          setRunDetail(detail);
+          if (detail.run.status === 'queued' || detail.run.status === 'running') {
+            timer = window.setTimeout(load, 1_000);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) notify('The Run status could not be loaded.');
+        });
+    };
+
+    const active = latestRun.status === 'queued' || latestRun.status === 'running';
+    timer = window.setTimeout(load, active ? 1_200 : 0);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [latestRun?.id, latestRun?.status, notify]);
+
   // App-level maximize, not the browser Fullscreen API. Escape exits and the
   // toolbar toggle regains focus.
   useEffect(() => {
@@ -370,6 +419,49 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
     }
   }, [notify, startingRun, validateDraft]);
 
+  /** Cancels queued and running work; terminal Runs are left unchanged. */
+  const cancelLatestRun = useCallback(async () => {
+    if (!latestRun || runActionPending) return;
+    setRunActionPending(true);
+    try {
+      const { run } = await cancelRun(latestRun.id);
+      setLatestRun(run);
+      setRunDetail(await getRun(run.id));
+      notify(`Run ${run.id} canceled.`);
+    } catch (error) {
+      notify(
+        error instanceof ApiError
+          ? `The Run could not be canceled: ${error.message}`
+          : 'The Run could not be canceled.',
+      );
+    } finally {
+      setRunActionPending(false);
+    }
+  }, [latestRun, notify, runActionPending]);
+
+  /** Queues a new attempt for one failed or canceled Task. */
+  const rerunFailedTask = useCallback(
+    async (task: Task) => {
+      if (!latestRun || runActionPending) return;
+      setRunActionPending(true);
+      try {
+        const result = await rerunTask(latestRun.id, task.id);
+        setLatestRun(result.run);
+        setRunDetail(await getRun(result.run.id));
+        notify(`Attempt ${result.task.attempt} queued for ${task.nodeId}.`);
+      } catch (error) {
+        notify(
+          error instanceof ApiError
+            ? `The Task could not be rerun: ${error.message}`
+            : 'The Task could not be rerun.',
+        );
+      } finally {
+        setRunActionPending(false);
+      }
+    },
+    [latestRun, notify, runActionPending],
+  );
+
   const explorerRail = useMemo(
     () => (
       <div className="panel-rail" data-testid="explorer-rail">
@@ -471,7 +563,13 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
               />
             )}
           </div>
-          <RunMonitor run={latestRun} />
+          <RunMonitor
+            run={latestRun}
+            detail={runDetail}
+            onCancel={() => void cancelLatestRun()}
+            onRerun={(task) => void rerunFailedTask(task)}
+            actionPending={runActionPending}
+          />
         </main>
 
         {!maximize && !agentCollapsed ? (

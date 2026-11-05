@@ -1,5 +1,21 @@
 import type { NodeManifest } from './workflow';
-import type { SchemaRef } from './execution';
+import type { NodeFailureKind, SchemaRef } from './execution';
+
+/**
+ * A Node implementation may throw this error to declare how its failure should
+ * be classified. The Compute Executor persists the classification so the
+ * Orchestrator can apply the Manifest RetryPolicy: `transient`, `timeout`, and
+ * `exit-code` may be retried; `parameter` and `validation` never are.
+ */
+export class NodeExecutionError extends Error {
+  readonly failureKind: NodeFailureKind;
+
+  constructor(failureKind: NodeFailureKind, message: string) {
+    super(message);
+    this.name = 'NodeExecutionError';
+    this.failureKind = failureKind;
+  }
+}
 
 /**
  * Node execution contract shared by built-in Node packages and the local

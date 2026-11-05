@@ -147,6 +147,9 @@ export * from './workflow-validation';
 export * from './run';
 export * from './json-patch';
 export * from './agent-patch';
+export * from './scientific';
+export * from './execution';
+export * from './node-run';
 
 /**
  * `WS /api/terminal` protocol.

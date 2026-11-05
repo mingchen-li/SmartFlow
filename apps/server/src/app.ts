@@ -5,6 +5,8 @@ import fastifyCookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { createBuiltinNodeRegistry } from '@sflow/nodes';
+import { LocalExecutor, Orchestrator } from '@sflow/orchestrator';
 import { registerAuthGuard, registerAuthRoutes } from './auth';
 import { registerAgentPatchRoutes } from './agent-patches';
 import { installErrorHandler } from './errors';
@@ -32,6 +34,7 @@ export interface ProjectServer {
   app: FastifyInstance;
   store: ProjectStore;
   session: SessionService;
+  orchestrator: Orchestrator;
   generatedCredential?: string;
   listen(port?: number, host?: string): Promise<ListenResult>;
   close(): Promise<void>;
@@ -53,6 +56,12 @@ export async function createProjectServer(
   const store = new ProjectStore(projectRoot);
   const { generatedCredential } = store.initializeCredential(options.credential);
   const session = new SessionService(store.getSessionSecret());
+  const executor = new LocalExecutor({
+    projectRoot,
+    jobsDir: join(store.sflowDir, 'executor'),
+    registry: createBuiltinNodeRegistry(),
+  });
+  const orchestrator = new Orchestrator({ store, executor });
   const app = Fastify({ logger: options.logger ?? false });
 
   // Install the error and not-found handlers before routes register so every
@@ -66,7 +75,7 @@ export async function createProjectServer(
   registerAuthRoutes(app, store, session);
   registerNodeRoutes(app);
   registerWorkspaceRoutes(app, store);
-  registerRunRoutes(app, store);
+  registerRunRoutes(app, store, orchestrator);
   registerAgentPatchRoutes(app, store);
   registerTerminalRoute(app, store);
   registerPages(app, session, webDist);
@@ -81,6 +90,8 @@ export async function createProjectServer(
   }
 
   app.addHook('onClose', async () => {
+    // Stop active Runs before closing the store they persist through.
+    await orchestrator.close();
     store.close();
   });
 
@@ -88,6 +99,7 @@ export async function createProjectServer(
     app,
     store,
     session,
+    orchestrator,
     generatedCredential,
     async listen(port = 4173, host = '127.0.0.1'): Promise<ListenResult> {
       const address = await app.listen({ port, host });

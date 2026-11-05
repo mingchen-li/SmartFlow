@@ -11,7 +11,7 @@ import type {
   NodeCatalogResponse,
   Project,
   RotateCredentialResponse,
-  Run,
+  RunDetailResponse,
   RunListResponse,
   SaveWorkflowDraftRequest,
   SessionResponse,
@@ -149,8 +149,9 @@ export function createRun(id: string): Promise<CreateRunResponse> {
   );
 }
 
-export function getRun(id: string): Promise<Run> {
-  return apiGet<Run>(`/api/runs/${encodeURIComponent(id)}`);
+/** Run detail includes Tasks, Artifacts, and Metrics while execution proceeds. */
+export function getRun(id: string): Promise<RunDetailResponse> {
+  return apiGet<RunDetailResponse>(`/api/runs/${encodeURIComponent(id)}`);
 }
 
 export function listRuns(): Promise<RunListResponse> {

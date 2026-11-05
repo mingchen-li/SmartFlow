@@ -8,5 +8,8 @@
   },
   "dependencies": {
     "@sflow/domain": "workspace:*"
+  },
+  "devDependencies": {
+    "@sflow/nodes": "workspace:*"
   }
 }

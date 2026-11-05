@@ -138,6 +138,12 @@ export const MetricSpecSchema = z.strictObject({
   description: z.string().max(2_000).optional(),
   valueType: z.enum(['number', 'string', 'boolean']),
   unit: z.string().min(1).max(200).optional(),
+  scale: z
+    .strictObject({
+      min: z.number().optional(),
+      max: z.number().optional(),
+    })
+    .optional(),
   direction: z.enum(['higher-is-better', 'lower-is-better', 'neutral']).optional(),
 });
 export type MetricSpec = z.infer<typeof MetricSpecSchema>;

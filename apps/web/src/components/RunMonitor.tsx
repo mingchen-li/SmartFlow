@@ -23,6 +23,18 @@ const MONITOR_TABS: Array<{ id: MonitorTab; label: string }> = [
   { id: 'results', label: 'Results' },
 ];
 
+function taskBadgeClass(state: Task['state']): string {
+  switch (state) {
+    case 'completed':
+      return 'badge badge-success';
+    case 'failed':
+    case 'canceled':
+      return 'badge badge-warning';
+    default:
+      return 'badge badge-info';
+  }
+}
+
 export interface RunMonitorProps {
   /** Most recent Run, or null before the first Run starts. */
   run?: Run | null;
@@ -31,6 +43,11 @@ export interface RunMonitorProps {
   /** Append-only Run events already observed by the workspace. */
   events?: readonly RunEvent[];
   onOpenResultView?: (runId: string) => void;
+  /** Cancels the active Run; completed science stays untouched. */
+  onCancel?: () => void;
+  /** Explicitly reruns the selected failed or canceled Task attempt. */
+  onRerun?: (task: Task) => void;
+  actionPending?: boolean;
 }
 
 function statusTone(status: string | null | undefined): string {
@@ -102,24 +119,52 @@ function countTasks(tasks: readonly Task[]): Record<TaskState, number> {
  * events; presentation state never enters Workflow IR or EditorLayout. Cards
  * use an auto-fit grid and panels scroll internally so content stacks instead
  * of disappearing at narrow widths.
+ *
+ * The attempt history keeps every Task attempt and failure visible, including
+ * attempts superseded by a retry or an explicit rerun. The header exposes
+ * Cancel Run while the Run is active; failed or canceled latest attempts offer
+ * an explicit Rerun.
  */
 export function RunMonitor({
   run = null,
   detail = null,
   events = [],
   onOpenResultView,
+  onCancel,
+  onRerun,
+  actionPending = false,
 }: RunMonitorProps) {
   const [tab, setTab] = useState<MonitorTab>('overview');
-  const runStatus = run?.status ?? 'Idle';
-  const active = run ? isActiveRunStatus(run.status) : false;
+  const effectiveRun = detail?.run ?? run;
+  const runStatus = effectiveRun?.status ?? 'Idle';
+  const active = effectiveRun ? isActiveRunStatus(effectiveRun.status) : false;
   const tasks = detail?.tasks ?? [];
   const artifacts = detail?.artifacts ?? [];
   const metrics = detail?.metrics ?? [];
-  const snapshotNodes = run?.snapshot.nodes ?? [];
+  const snapshotNodes = effectiveRun?.snapshot.nodes ?? [];
   const counts = countTasks(tasks);
-  const taskLogs = useTaskLogs(run?.id ?? null, detail?.tasks);
+  const taskLogs = useTaskLogs(effectiveRun?.id ?? null, detail?.tasks);
   const completedPercent =
     tasks.length === 0 ? 0 : Math.round((counts.completed / tasks.length) * 100);
+
+  const nodeOrder = new Map(
+    snapshotNodes.map((node, index) => [node.nodeId, index]),
+  );
+  const latestByNode = new Map<string, Task>();
+  for (const task of tasks) {
+    const current = latestByNode.get(task.nodeId);
+    if (!current || task.attempt > current.attempt) latestByNode.set(task.nodeId, task);
+  }
+  const orderedTasks = [...tasks].sort((left, right) => {
+    const order =
+      (nodeOrder.get(left.nodeId) ?? Number.MAX_SAFE_INTEGER) -
+      (nodeOrder.get(right.nodeId) ?? Number.MAX_SAFE_INTEGER);
+    return order !== 0 ? order : left.attempt - right.attempt;
+  });
+  const canCancel =
+    effectiveRun !== null &&
+    (effectiveRun.status === 'queued' || effectiveRun.status === 'running') &&
+    onCancel !== undefined;
 
   const cpuReserved = tasks
     .filter((task) => task.state === 'running' || task.state === 'queued')
@@ -130,18 +175,31 @@ export function RunMonitor({
       className="run-monitor"
       aria-label="Run monitor"
       data-testid="run-monitor"
-      data-run-status={run?.status ?? 'idle'}
+      data-run-status={effectiveRun?.status ?? 'idle'}
       data-active={active ? 'true' : 'false'}
     >
       <header className="run-monitor-header">
         <span>Run monitor</span>
         <span className="monitor-header-meta">
           {active ? <span className="monitor-live">Live</span> : null}
-          <span
-            className={`badge ${statusTone(run?.status)}`}
-            data-testid="monitor-run-status"
-          >
-            {runStatus}
+          <span className="run-monitor-actions">
+            {canCancel ? (
+              <button
+                type="button"
+                className="button button-ghost"
+                data-testid="cancel-run"
+                disabled={actionPending}
+                onClick={onCancel}
+              >
+                Cancel Run
+              </button>
+            ) : null}
+            <span
+              className={`badge ${statusTone(effectiveRun?.status)}`}
+              data-testid="monitor-run-status"
+            >
+              {runStatus}
+            </span>
           </span>
         </span>
       </header>
@@ -169,13 +227,13 @@ export function RunMonitor({
               <article className="card">
                 <div className="card-header">
                   <span className="card-title">Run state</span>
-                  <span className={`badge ${statusTone(run?.status)}`}>{runStatus}</span>
+                  <span className={`badge ${statusTone(effectiveRun?.status)}`}>{runStatus}</span>
                 </div>
                 <div className="card-value" data-testid="monitor-run-state">
                   {runStatus}
                 </div>
                 <div className="muted" data-testid="monitor-run-id">
-                  {run ? `Run ${run.id}` : 'No active Run.'}
+                  {effectiveRun ? `Run ${effectiveRun.id}` : 'No active Run.'}
                 </div>
               </article>
               <article className="card">
@@ -220,15 +278,75 @@ export function RunMonitor({
                   {cpuReserved} CPU reserved
                 </div>
                 <div className="muted">
-                  {run ? 'Local Compute Executor' : 'Nothing reserved.'}
+                  {effectiveRun ? 'Local Compute Executor' : 'Nothing reserved.'}
                 </div>
               </article>
             </div>
             <p className="monitor-placeholder">
-              {run
+              {effectiveRun
                 ? `${events.length} Run events observed · ${artifacts.length} output files · ${metrics.length} Metrics`
                 : 'No Run yet. Validate the Workflow and start a Run to inspect it here.'}
             </p>
+
+            {orderedTasks.length > 0 ? (
+              <div className="attempt-history" data-testid="attempt-history">
+                <div className="attempt-history-title">Attempts and failure history</div>
+                <ol className="attempt-list">
+                  {orderedTasks.map((task) => {
+                    const label = snapshotNodeLabel(snapshotNodes, task.nodeId);
+                    const latest = latestByNode.get(task.nodeId)?.id === task.id;
+                    const canRerun =
+                      latest &&
+                      (task.state === 'failed' || task.state === 'canceled') &&
+                      onRerun !== undefined;
+                    return (
+                      <li
+                        key={task.id}
+                        className="attempt-row"
+                        data-testid={`task-attempt-${task.id}`}
+                        data-node-id={task.nodeId}
+                        data-attempt={task.attempt}
+                        data-state={task.state}
+                        data-latest={latest ? 'true' : 'false'}
+                      >
+                        <span className="attempt-node">{label}</span>
+                        <span className="badge badge-neutral">Attempt {task.attempt}</span>
+                        <span className={taskBadgeClass(task.state)}>
+                          {task.state}
+                          {latest ? '' : ' (superseded)'}
+                        </span>
+                        {task.failureKind ? (
+                          <span className="attempt-failure-kind">{task.failureKind}</span>
+                        ) : null}
+                        {task.error ? (
+                          <span className="attempt-error" title={task.error}>
+                            {task.error}
+                          </span>
+                        ) : null}
+                        <span className="attempt-actions">
+                          {task.logsAvailable ? <span className="muted">logs</span> : null}
+                          {canRerun ? (
+                            <button
+                              type="button"
+                              className="button button-ghost"
+                              data-testid={`rerun-task-${task.id}`}
+                              disabled={actionPending}
+                              onClick={() => onRerun?.(task)}
+                            >
+                              Rerun
+                            </button>
+                          ) : null}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ol>
+              </div>
+            ) : (
+              <p className="monitor-placeholder" data-testid="monitor-empty">
+                No Task attempts yet.
+              </p>
+            )}
           </div>
         ) : null}
 
@@ -273,7 +391,7 @@ export function RunMonitor({
 
         {tab === 'resources' ? (
           <div data-testid="monitor-panel-resources">
-            {run ? (
+            {effectiveRun ? (
               <>
                 <p className="monitor-resource-usage" data-testid="monitor-resource-usage">
                   {counts.running} running · {counts.queued} queued · {cpuReserved} CPU reserved
@@ -344,7 +462,7 @@ export function RunMonitor({
 
         {tab === 'logs' ? (
           <div data-testid="monitor-panel-logs">
-            {run ? (
+            {effectiveRun ? (
               <div className="monitor-log-grid">
                 <section className="monitor-log-section">
                   <h3 className="section-title">Run events</h3>
@@ -394,7 +512,7 @@ export function RunMonitor({
                         </span>
                         <a
                           className="button button-sm button-outline"
-                          href={artifactDownloadUrl(run!.id, artifact.id)}
+                          href={artifactDownloadUrl(effectiveRun!.id, artifact.id)}
                           download={artifact.name}
                           data-testid={`monitor-artifact-download-${artifact.id}`}
                         >
@@ -428,8 +546,8 @@ export function RunMonitor({
               type="button"
               className="button button-outline"
               data-testid="open-result-view"
-              disabled={!run}
-              onClick={() => run && onOpenResultView?.(run.id)}
+              disabled={!effectiveRun}
+              onClick={() => effectiveRun && onOpenResultView?.(effectiveRun.id)}
             >
               Open Result View
             </button>

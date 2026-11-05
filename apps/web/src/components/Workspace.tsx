@@ -12,11 +12,13 @@ import {
   type Run,
   type RunDetailResponse,
   type RunEvent,
+  type Task,
   type ValidateWorkflowResponse,
   type ValidationDiagnostic,
 } from '@sflow/domain';
 import {
   ApiError,
+  cancelRun,
   createRun,
   getRun,
   getRunEvents,
@@ -25,6 +27,7 @@ import {
   listNodeManifests,
   listRuns,
   registerFileReference,
+  rerunTask,
   validateWorkflowDraft,
 } from '../api';
 import { useDraftAutosave } from '../editor/useDraftAutosave';
@@ -76,6 +79,8 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
   const [runs, setRuns] = useState<Run[]>([]);
   const [runDetail, setRunDetail] = useState<RunDetailResponse | null>(null);
   const [runEvents, setRunEvents] = useState<RunEvent[]>([]);
+  const [runActionPending, setRunActionPending] = useState(false);
+  const [runPollEpoch, setRunPollEpoch] = useState(0);
   const [resultRunId, setResultRunId] = useState<string | null>(null);
   const selectedPathRef = useRef<string | null>(null);
   const wasMaximizedRef = useRef(false);
@@ -238,7 +243,9 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
 
   // While a Run is active, poll Run detail and append-only events so every
   // monitor tab and the canvas overlay observe live state. Polling only reads
-  // persisted Run data; it never writes editorial or draft state.
+  // persisted Run data; it never writes editorial or draft state. A cancel or
+  // rerun action bumps `runPollEpoch` so an action that resumes an otherwise
+  // terminal Run restarts observation with fresh history.
   const runId = latestRun?.id ?? null;
   useEffect(() => {
     setRunDetail(null);
@@ -293,10 +300,11 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-    // `latestRun` is read only to decide the initial hold; run identity drives
-    // the effect so polling Run detail updates cannot restart it.
+    // `latestRun` is read only to decide the initial hold; run identity and an
+    // explicit action epoch drive the effect so polling Run detail updates
+    // cannot restart it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId]);
+  }, [runId, runPollEpoch]);
 
   // Read-only projection of active Run state onto Nodes that belong to the
   // Run's snapshot. Undefined once the Run reaches a terminal state.
@@ -471,6 +479,56 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
     }
   }, [notify, startingRun, validateDraft]);
 
+  /** Cancels queued and running work; terminal Runs are left unchanged. */
+  const cancelLatestRun = useCallback(async () => {
+    if (!latestRun || runActionPending) return;
+    setRunActionPending(true);
+    try {
+      const { run } = await cancelRun(latestRun.id);
+      setLatestRun(run);
+      setRuns((current) => current.map((entry) => (entry.id === run.id ? run : entry)));
+      setRunDetail(await getRun(run.id));
+      notify(`Run ${run.id} canceled.`);
+    } catch (error) {
+      notify(
+        error instanceof ApiError
+          ? `The Run could not be canceled: ${error.message}`
+          : 'The Run could not be canceled.',
+      );
+    } finally {
+      setRunActionPending(false);
+    }
+  }, [latestRun, notify, runActionPending]);
+
+  /** Queues a new attempt for one failed or canceled Task. */
+  const rerunFailedTask = useCallback(
+    async (task: Task) => {
+      if (!latestRun || runActionPending) return;
+      setRunActionPending(true);
+      try {
+        const result = await rerunTask(latestRun.id, task.id);
+        setLatestRun(result.run);
+        setRuns((current) =>
+          current.map((entry) => (entry.id === result.run.id ? result.run : entry)),
+        );
+        // Resume observation: the Run is active again even though its id did
+        // not change, so the polling effect must restart.
+        setRunPollEpoch((value) => value + 1);
+        setRunDetail(await getRun(result.run.id));
+        notify(`Attempt ${result.task.attempt} queued for ${task.nodeId}.`);
+      } catch (error) {
+        notify(
+          error instanceof ApiError
+            ? `The Task could not be rerun: ${error.message}`
+            : 'The Task could not be rerun.',
+        );
+      } finally {
+        setRunActionPending(false);
+      }
+    },
+    [latestRun, notify, runActionPending],
+  );
+
   const explorerRail = useMemo(
     () => (
       <div className="panel-rail" data-testid="explorer-rail">
@@ -580,6 +638,9 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
             detail={runDetail}
             events={runEvents}
             onOpenResultView={openResultView}
+            onCancel={() => void cancelLatestRun()}
+            onRerun={(task) => void rerunFailedTask(task)}
+            actionPending={runActionPending}
           />
         </main>
 

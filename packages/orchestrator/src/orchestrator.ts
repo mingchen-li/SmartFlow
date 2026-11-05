@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
+  shouldRetryTask,
   TASK_TERMINAL_STATES,
+  type NodeFailureKind,
   type Provenance,
   type Run,
   type RunNodeSnapshot,
@@ -25,6 +27,11 @@ export interface OrchestratorOptions {
   /** Poll cadence while a Compute Executor job is active. */
   pollIntervalMs?: number;
   clock?: () => Date;
+  /**
+   * Waits out a retry backoff. Returns false when the Run was canceled while
+   * waiting. Tests inject a deterministic implementation.
+   */
+  retryWait?: (milliseconds: number, signal: AbortSignal) => Promise<boolean>;
 }
 
 export interface RunOptions {
@@ -34,6 +41,31 @@ export interface RunOptions {
 export interface PlannedNode {
   node: RunNodeSnapshot;
   incoming: WorkflowEdge[];
+}
+
+type TaskOutcome =
+  | { type: 'completed'; outputs: TaskOutputRecord[] }
+  | { type: 'stopped' }
+  | { type: 'retry'; task: Task; backoffSeconds: number };
+
+export type OrchestratorErrorCode =
+  | 'RUN_NOT_FOUND'
+  | 'RUN_ACTIVE'
+  | 'RUN_COMPLETED'
+  | 'TASK_NOT_FOUND'
+  | 'TASK_COMPLETED'
+  | 'TASK_NOT_TERMINAL'
+  | 'TASK_SUPERSEDED';
+
+/** A rejected cancellation/rerun command, mapped to HTTP 409 by the Server. */
+export class OrchestratorError extends Error {
+  readonly code: OrchestratorErrorCode;
+
+  constructor(code: OrchestratorErrorCode, message: string) {
+    super(message);
+    this.name = 'OrchestratorError';
+    this.code = code;
+  }
 }
 
 const TERMINAL_STATES = new Set<TaskState>(TASK_TERMINAL_STATES);
@@ -49,6 +81,25 @@ const INTERRUPTED_EXIT_CODE = 137;
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/** Abortable retry backoff; resolves false if the Run is canceled first. */
+function waitForRetry(milliseconds: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  if (milliseconds <= 0) return Promise.resolve(true);
+
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(true);
+    }, milliseconds);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function errorMessage(error: unknown): string {
@@ -122,8 +173,10 @@ export class Orchestrator {
   private readonly executor: ComputeExecutor;
   private readonly pollIntervalMs: number;
   private readonly clock: () => Date;
+  private readonly retryWait: (milliseconds: number, signal: AbortSignal) => Promise<boolean>;
   private readonly active = new Map<string, Promise<void>>();
   private readonly controllers = new Map<string, AbortController>();
+  private readonly canceling = new Set<string>();
   private closing = false;
 
   constructor(options: OrchestratorOptions) {
@@ -131,6 +184,7 @@ export class Orchestrator {
     this.executor = options.executor;
     this.pollIntervalMs = options.pollIntervalMs ?? 100;
     this.clock = options.clock ?? (() => new Date());
+    this.retryWait = options.retryWait ?? waitForRetry;
   }
 
   /**
@@ -180,12 +234,23 @@ export class Orchestrator {
    * rethrows; an ordinary Node failure is persisted and resolves normally.
    */
   async run(runId: string, options: RunOptions = {}): Promise<void> {
+    let ownedController: AbortController | undefined;
+    let signal = options.signal;
+    if (!signal) {
+      ownedController = new AbortController();
+      signal = ownedController.signal;
+      this.controllers.set(runId, ownedController);
+    }
     try {
-      await this.executeRun(runId, options.signal);
+      await this.executeRun(runId, signal);
     } catch (error) {
       if (this.closing) return;
       this.markRunFailed(runId, errorMessage(error));
       throw error;
+    } finally {
+      if (ownedController && this.controllers.get(runId) === ownedController) {
+        this.controllers.delete(runId);
+      }
     }
   }
 
@@ -211,6 +276,19 @@ export class Orchestrator {
       const task = tasks.get(planned.node.nodeId)!;
       if (task.state === 'completed') continue;
       if (task.state === 'failed') {
+        // The Server may have stopped after persisting a retryable failure but
+        // before scheduling the next attempt. Recovery uses the same immutable
+        // Manifest policy; canceled or non-retryable work still fails the Run.
+        const retry = this.scheduleRetry(
+          run,
+          planned.node,
+          task,
+          task.failureKind ?? 'unknown',
+        );
+        if (retry) {
+          tasks.set(planned.node.nodeId, retry.task);
+          continue;
+        }
         this.markRunFailed(run.id, task.error ?? 'The Task failed.', task.id);
         return;
       }
@@ -234,13 +312,19 @@ export class Orchestrator {
           continue;
         }
         if (job.state === 'failed') {
-          this.failTask(
+          const outcome = this.failAttempt(
             run,
+            planned,
             task,
             job.error ?? 'The Node execution failed.',
+            job.failureKind ?? 'unknown',
             job.jobId,
             job.exitCode ?? 1,
           );
+          if (outcome.type === 'retry') {
+            tasks.set(planned.node.nodeId, outcome.task);
+            continue;
+          }
           return;
         }
         const completedAt = this.now();
@@ -327,10 +411,12 @@ export class Orchestrator {
   ): Promise<boolean> {
     const poll = await this.executor.poll(jobId);
     if (poll.state !== 'completed' || !poll.result) {
-      this.failTask(
+      this.failAttempt(
         run,
+        planned,
         task,
         poll.error ?? `Executor job "${jobId}" completed without a Task result.`,
+        poll.failureKind ?? 'unknown',
         jobId,
         poll.exitCode ?? 1,
       );
@@ -361,7 +447,7 @@ export class Orchestrator {
     });
   }
 
-  private async executeRun(runId: string, signal?: AbortSignal): Promise<void> {
+  private async executeRun(runId: string, signal: AbortSignal): Promise<void> {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`Unknown Run "${runId}".`);
     if (TERMINAL_RUN_STATES.has(run.status)) return;
@@ -370,7 +456,7 @@ export class Orchestrator {
     const tasks = this.ensureTasks(run, plan);
 
     if (this.closing) return;
-    if (signal?.aborted) {
+    if (signal.aborted) {
       this.markRunCanceled(runId);
       return;
     }
@@ -394,14 +480,10 @@ export class Orchestrator {
     }
 
     for (const planned of plan) {
-      const task = tasks.get(planned.node.nodeId)!;
+      let task = tasks.get(planned.node.nodeId)!;
       if (task.state === 'completed') continue;
 
       if (this.closing) return;
-      if (signal?.aborted) {
-        this.markRunCanceled(runId);
-        return;
-      }
 
       if (task.state === 'failed') {
         this.markRunFailed(runId, task.error ?? 'The Task failed.', task.id);
@@ -414,16 +496,41 @@ export class Orchestrator {
 
       const inputs = this.resolveInputs(planned, outputsByNode);
       const upstreamArtifacts = this.upstreamArtifactIds(planned, outputsByNode);
-      const outcome = await this.executeTask(
-        run,
-        task,
-        planned,
-        inputs,
-        upstreamArtifacts,
-        signal,
-      );
-      if (outcome.type !== 'completed') return;
-      outputsByNode.set(task.nodeId, outcome.outputs);
+
+      for (;;) {
+        if (this.closing) return;
+        if (signal.aborted) {
+          this.markRunCanceled(runId);
+          return;
+        }
+
+        const outcome = await this.executeTask(
+          run,
+          task,
+          planned,
+          inputs,
+          upstreamArtifacts,
+          signal,
+        );
+        if (outcome.type === 'completed') {
+          outputsByNode.set(task.nodeId, outcome.outputs);
+          break;
+        }
+        if (outcome.type === 'stopped') return;
+
+        // A retryable failure is persisted history; the next attempt is a new
+        // Task row and waits out the Manifest backoff before executing.
+        const retryAllowed = await this.retryWait(
+          outcome.backoffSeconds * 1_000,
+          signal,
+        );
+        if (this.closing) return;
+        if (!retryAllowed || signal.aborted) {
+          this.markRunCanceled(runId);
+          return;
+        }
+        task = outcome.task;
+      }
     }
 
     this.completeRun(runId, plan.length);
@@ -507,7 +614,11 @@ export class Orchestrator {
     inputs: Record<string, unknown>,
     upstreamArtifacts: string[],
     signal?: AbortSignal,
-  ): Promise<{ type: 'completed'; outputs: TaskOutputRecord[] } | { type: 'stopped' }> {
+  ): Promise<TaskOutcome> {
+    // A cancellation or rerun may have closed this attempt while the Run was
+    // waiting out a retry backoff. Never reopen terminal history.
+    if (this.isTerminal(task.id)) return { type: 'stopped' };
+
     const node = planned.node;
     const logsPath = `${this.store.taskNamespacePath(run.id, task.id)}/logs.txt`;
     const startedAt = this.now();
@@ -545,10 +656,17 @@ export class Orchestrator {
       // explicit executor.cancel call when a Run is canceled.
       const submitted = await this.executor.submit(spec);
       jobId = submitted.jobId;
+      if (this.isTerminal(task.id)) {
+        // The attempt was canceled while submission was in flight; the job
+        // must stop even though it was not visible to the cancel sweep.
+        await this.executor.cancel(jobId).catch(() => undefined);
+        return { type: 'stopped' };
+      }
       this.store.updateTask(task.id, { jobId });
     } catch (error) {
       if (this.closing) return { type: 'stopped' };
-      return this.failTask(run, task, errorMessage(error));
+      if (this.isTerminal(task.id)) return { type: 'stopped' };
+      return this.failAttempt(run, planned, task, errorMessage(error), 'unknown');
     }
 
     if (this.closing) return { type: 'stopped' };
@@ -569,10 +687,18 @@ export class Orchestrator {
       }
     } catch (error) {
       if (this.closing) return { type: 'stopped' };
-      return this.failTask(run, task, errorMessage(error), jobId);
+      return this.failAttempt(
+        run,
+        planned,
+        task,
+        errorMessage(error),
+        'unknown',
+        jobId,
+      );
     }
 
     if (this.closing) return { type: 'stopped' };
+    if (this.isTerminal(task.id)) return { type: 'stopped' };
 
     if (poll.state === 'canceled') {
       const completedAt = this.now();
@@ -593,10 +719,12 @@ export class Orchestrator {
     }
 
     if (poll.state === 'failed') {
-      return this.failTask(
+      return this.failAttempt(
         run,
+        planned,
         task,
         poll.error ?? 'The Node execution failed.',
+        poll.failureKind ?? 'unknown',
         jobId,
         poll.exitCode ?? 1,
       );
@@ -617,8 +745,21 @@ export class Orchestrator {
       );
       return { type: 'completed', outputs };
     } catch (error) {
-      return this.failTask(run, task, errorMessage(error), jobId);
+      return this.failAttempt(
+        run,
+        planned,
+        task,
+        errorMessage(error),
+        'unknown',
+        jobId,
+      );
     }
+  }
+
+  /** True when another actor (for example a cancellation) already closed the Task. */
+  private isTerminal(taskId: string): boolean {
+    const current = this.store.getTask(taskId);
+    return !current || TERMINAL_STATES.has(current.state);
   }
 
   /**
@@ -777,18 +918,29 @@ export class Orchestrator {
     return outputs;
   }
 
-  private failTask(
+  /**
+   * Records a failed attempt and decides, from the immutable Node Manifest
+   * RetryPolicy, whether another attempt may run. Only transient, timeout, and
+   * exit-code failures are ever retried; parameter and validation errors end
+   * the Run immediately.
+   */
+  private failAttempt(
     run: Run,
+    planned: PlannedNode,
     task: Task,
     message: string,
+    failureKind: NodeFailureKind,
     jobId?: string,
     exitCode = 1,
-  ): { type: 'stopped' } {
+  ): TaskOutcome {
+    if (this.isTerminal(task.id)) return { type: 'stopped' };
+
     const completedAt = this.now();
     this.store.updateTask(task.id, {
       state: 'failed',
       exitCode,
       error: message,
+      failureKind,
       ...(jobId ? { jobId } : {}),
       completedAt,
     });
@@ -796,11 +948,191 @@ export class Orchestrator {
       runId: run.id,
       taskId: task.id,
       type: 'task.failed',
-      payload: { exitCode, error: message },
+      payload: {
+        nodeId: planned.node.nodeId,
+        attempt: task.attempt,
+        exitCode,
+        error: message,
+        failureKind,
+      },
       createdAt: completedAt,
     });
+
+    const retry = this.scheduleRetry(run, planned.node, task, failureKind, message);
+    if (retry) return retry;
     this.markRunFailed(run.id, message, task.id);
     return { type: 'stopped' };
+  }
+
+  /**
+   * Creates the next Task attempt when the Manifest policy allows it. The
+   * failed attempt stays immutable history; the new attempt is visible as
+   * queued while the Run waits out the backoff.
+   */
+  private scheduleRetry(
+    run: Run,
+    node: RunNodeSnapshot,
+    task: Task,
+    failureKind: NodeFailureKind,
+    message = task.error ?? 'The Task failed.',
+  ): Extract<TaskOutcome, { type: 'retry' }> | undefined {
+    if (this.closing || this.canceling.has(run.id)) return undefined;
+    const currentRun = this.store.getRun(run.id);
+    if (!currentRun || TERMINAL_RUN_STATES.has(currentRun.status)) return undefined;
+    if (!shouldRetryTask(node.retry, task.attempt, failureKind)) return undefined;
+
+    const retryTask = this.createTask(run, node, task.attempt + 1);
+    this.store.appendEvent({
+      runId: run.id,
+      taskId: retryTask.id,
+      type: 'task.retry.scheduled',
+      payload: {
+        nodeId: node.nodeId,
+        attempt: retryTask.attempt,
+        previousAttempt: task.attempt,
+        failureKind,
+        backoffSeconds: node.retry.backoffSeconds,
+        error: message,
+      },
+      createdAt: this.now(),
+    });
+    return {
+      type: 'retry',
+      task: retryTask,
+      backoffSeconds: node.retry.backoffSeconds,
+    };
+  }
+
+  /**
+   * Cancels a Run: requests every running executor job to stop, closes all
+   * non-terminal attempts as canceled history, and records `run.canceled`.
+   * Terminal Runs are returned unchanged, so this command is idempotent and
+   * can never rewrite completed science.
+   */
+  async cancelRun(runId: string): Promise<Run> {
+    const run = this.store.getRun(runId);
+    if (!run) throw new OrchestratorError('RUN_NOT_FOUND', `Unknown Run "${runId}".`);
+    if (TERMINAL_RUN_STATES.has(run.status)) return run;
+
+    this.canceling.add(runId);
+    try {
+      this.controllers.get(runId)?.abort();
+
+      const plan = planRun(run.snapshot);
+      const tasks = this.ensureTasks(run, plan);
+      for (const task of tasks.values()) {
+        const current = this.store.getTask(task.id);
+        if (!current || TERMINAL_STATES.has(current.state)) continue;
+
+        if (current.state === 'running' && current.jobId) {
+          await this.executor.cancel(current.jobId).catch(() => undefined);
+        }
+
+        const latest = this.store.getTask(task.id);
+        if (!latest || TERMINAL_STATES.has(latest.state)) continue;
+        const completedAt = this.now();
+        this.store.updateTask(task.id, {
+          state: 'canceled',
+          exitCode: 130,
+          completedAt,
+        });
+        this.store.appendEvent({
+          runId: run.id,
+          taskId: task.id,
+          type: 'task.canceled',
+          payload: {
+            nodeId: latest.nodeId,
+            attempt: latest.attempt,
+            exitCode: 130,
+            reason: 'run-canceled',
+          },
+          createdAt: completedAt,
+        });
+      }
+
+      this.markRunCanceled(runId);
+      return this.store.getRun(runId)!;
+    } finally {
+      this.canceling.delete(runId);
+    }
+  }
+
+  /**
+   * Explicitly reruns one failed or canceled Task attempt as a new attempt.
+   * The original attempt and its logs stay visible; completed upstream work is
+   * reused and every other failed/canceled Node is replanned so the Run can
+   * reach a terminal state again.
+   */
+  async rerunTask(runId: string, taskId: string): Promise<{ run: Run; task: Task }> {
+    const run = this.store.getRun(runId);
+    if (!run) throw new OrchestratorError('RUN_NOT_FOUND', `Unknown Run "${runId}".`);
+    const task = this.store.getTask(taskId);
+    if (!task || task.runId !== runId) {
+      throw new OrchestratorError('TASK_NOT_FOUND', `Unknown Task "${taskId}" in Run "${runId}".`);
+    }
+    if (task.state === 'completed') {
+      throw new OrchestratorError(
+        'TASK_COMPLETED',
+        'A completed Task cannot be rerun; its scientific records are immutable.',
+      );
+    }
+    if (!TERMINAL_STATES.has(task.state)) {
+      throw new OrchestratorError('TASK_NOT_TERMINAL', 'Only failed or canceled Tasks can be rerun.');
+    }
+
+    const plan = planRun(run.snapshot);
+    const latest = new Map<string, Task>();
+    for (const candidate of this.store.listTasks(runId)) {
+      const existing = latest.get(candidate.nodeId);
+      if (!existing || candidate.attempt > existing.attempt) {
+        latest.set(candidate.nodeId, candidate);
+      }
+    }
+    if (latest.get(task.nodeId)?.id !== task.id) {
+      throw new OrchestratorError(
+        'TASK_SUPERSEDED',
+        'A newer attempt for this Node already exists; rerun the latest failed attempt.',
+      );
+    }
+    if (run.status === 'queued' || run.status === 'running') {
+      throw new OrchestratorError('RUN_ACTIVE', 'Cancel the active Run before rerunning a Task.');
+    }
+    if (run.status === 'completed') {
+      throw new OrchestratorError('RUN_COMPLETED', 'A completed Run cannot be rerun.');
+    }
+
+    // Stop any lingering monitor from the previous attempt before replanning.
+    this.controllers.get(runId)?.abort();
+    await this.whenIdle(runId);
+
+    const created = new Map<string, Task>();
+    for (const planned of plan) {
+      const nodeId = planned.node.nodeId;
+      const current = latest.get(nodeId);
+      if (!current) continue;
+      if (current.state === 'completed' || current.state === 'queued' || current.state === 'running') {
+        continue;
+      }
+      created.set(nodeId, this.createTask(run, planned.node, current.attempt + 1));
+    }
+
+    const rerunTask = created.get(task.nodeId)!;
+    this.store.appendEvent({
+      runId: run.id,
+      taskId: rerunTask.id,
+      type: 'run.rerun',
+      payload: {
+        taskId: task.id,
+        nodeId: task.nodeId,
+        previousAttempt: task.attempt,
+        attempt: rerunTask.attempt,
+      },
+      createdAt: this.now(),
+    });
+    this.store.updateRunStatus(runId, 'running');
+    this.start(runId);
+
+    return { run: this.store.getRun(runId)!, task: rerunTask };
   }
 
   private markRunFailed(runId: string, message: string, taskId?: string): void {

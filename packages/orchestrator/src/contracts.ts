@@ -3,6 +3,7 @@ import type {
   Metric,
   MetricSpec,
   NodeEnvironment,
+  NodeFailureKind,
   NodeMetricValue,
   NodeResources,
   Provenance,
@@ -82,6 +83,8 @@ export interface PollResult {
   state: 'queued' | 'running' | 'completed' | 'failed' | 'canceled';
   exitCode?: number;
   error?: string;
+  /** Executor classification used against the Node Manifest RetryPolicy. */
+  failureKind?: NodeFailureKind;
   logs?: string[];
   result?: ExecutorTaskResult;
 }
@@ -95,6 +98,7 @@ export interface ReconcileJob {
   state: PollResult['state'];
   exitCode?: number;
   error?: string;
+  failureKind?: NodeFailureKind;
 }
 
 export interface ReconcileResult {
@@ -130,6 +134,7 @@ export interface TaskPatch {
   logsPath?: string;
   exitCode?: number;
   error?: string;
+  failureKind?: NodeFailureKind;
   startedAt?: string;
   completedAt?: string;
 }

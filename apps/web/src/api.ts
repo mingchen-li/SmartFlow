@@ -12,6 +12,8 @@ import type {
   Project,
   ResultViewResponse,
   RotateCredentialResponse,
+  CancelRunResponse,
+  RerunTaskResponse,
   RunDetailResponse,
   RunEventsResponse,
   RunListResponse,
@@ -194,6 +196,25 @@ export function artifactDownloadUrl(runId: string, artifactId: string): string {
   return `/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(
     artifactId,
   )}/download`;
+}
+
+/**
+ * Cancels queued and running work. Canceling a terminal Run is idempotent and
+ * returns the unchanged Run.
+ */
+export function cancelRun(id: string): Promise<CancelRunResponse> {
+  return apiPost<CancelRunResponse>(`/api/runs/${encodeURIComponent(id)}/cancel`, {});
+}
+
+/**
+ * Reruns one failed or canceled Task attempt as a new attempt. The Server
+ * rejects completed, superseded, or still-active attempts with 409.
+ */
+export function rerunTask(runId: string, taskId: string): Promise<RerunTaskResponse> {
+  return apiPost<RerunTaskResponse>(
+    `/api/runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(taskId)}/rerun`,
+    {},
+  );
 }
 
 /**

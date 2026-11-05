@@ -10,12 +10,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import type {
-  NodeImplementation,
-  NodeMetricValue,
-  NodeRegistry,
-  NodeRunContext,
-  NodeRunResult,
+import {
+  NodeExecutionError,
+  type NodeFailureKind,
+  type NodeImplementation,
+  type NodeMetricValue,
+  type NodeRegistry,
+  type NodeRunContext,
+  type NodeRunResult,
 } from '@sflow/domain';
 import type {
   ComputeExecutor,
@@ -55,6 +57,7 @@ interface PersistedJob {
   state: PollResult['state'];
   exitCode?: number;
   error?: string;
+  failureKind?: NodeFailureKind;
   logsPath: string;
   createdAt: string;
   updatedAt: string;
@@ -191,6 +194,7 @@ export class LocalExecutor implements ComputeExecutor {
         state: job.state,
         ...(job.exitCode !== undefined ? { exitCode: job.exitCode } : {}),
         ...(job.error !== undefined ? { error: job.error } : {}),
+        ...(job.failureKind !== undefined ? { failureKind: job.failureKind } : {}),
       });
     }
 
@@ -255,8 +259,13 @@ export class LocalExecutor implements ComputeExecutor {
         return;
       }
       const message = error instanceof Error ? error.message : 'The Node execution failed.';
+      // A Node may classify its own failure. An unclassified throw is a
+      // non-zero process exit; parameter and validation errors are declared
+      // explicitly and are never eligible for Manifest retry.
+      const failureKind: NodeFailureKind =
+        error instanceof NodeExecutionError ? error.failureKind : 'exit-code';
       log(`error=${message}`);
-      this.finish(job, { state: 'failed', exitCode: 1, error: message }, log);
+      this.finish(job, { state: 'failed', exitCode: 1, error: message, failureKind }, log);
     }
   }
 
@@ -273,7 +282,8 @@ export class LocalExecutor implements ComputeExecutor {
 
     const outputs: ExecutorOutput[] = result.outputs.map((output) => {
       if (!declaredPorts.has(output.portId)) {
-        throw new Error(
+        throw new NodeExecutionError(
+          'validation',
           `Node "${implementation.manifest.id}" produced undeclared output port "${output.portId}".`,
         );
       }
@@ -292,12 +302,14 @@ export class LocalExecutor implements ComputeExecutor {
     for (const [metricId, value] of Object.entries(result.metrics ?? {})) {
       const metricSpec = declaredMetrics.get(metricId);
       if (!metricSpec) {
-        throw new Error(
+        throw new NodeExecutionError(
+          'validation',
           `Node "${implementation.manifest.id}" produced undeclared Metric "${metricId}".`,
         );
       }
       if (typeof value !== metricSpec.valueType) {
-        throw new Error(
+        throw new NodeExecutionError(
+          'validation',
           `Metric "${metricId}" must be a ${metricSpec.valueType}, received ${typeof value}.`,
         );
       }
@@ -330,18 +342,30 @@ export class LocalExecutor implements ComputeExecutor {
     log: (line: string) => void,
   ): ExecutorArtifactFile {
     if (!artifact.name || !artifact.mediaType) {
-      throw new Error('Artifact declarations require a name and media type.');
+      throw new NodeExecutionError(
+        'validation',
+        'Artifact declarations require a name and media type.',
+      );
     }
     if (isAbsolute(artifact.relativePath)) {
-      throw new Error(`Artifact "${artifact.name}" must stay inside the Task namespace.`);
+      throw new NodeExecutionError(
+        'validation',
+        `Artifact "${artifact.name}" must stay inside the Task namespace.`,
+      );
     }
 
     const absolute = resolve(taskDir, artifact.relativePath);
     if (!isInside(resolve(taskDir), absolute)) {
-      throw new Error(`Artifact "${artifact.name}" must stay inside the Task namespace.`);
+      throw new NodeExecutionError(
+        'validation',
+        `Artifact "${artifact.name}" must stay inside the Task namespace.`,
+      );
     }
     if (!existsSync(absolute) || !statSync(absolute).isFile()) {
-      throw new Error(`Artifact "${artifact.name}" was not written to "${artifact.relativePath}".`);
+      throw new NodeExecutionError(
+        'validation',
+        `Artifact "${artifact.name}" was not written to "${artifact.relativePath}".`,
+      );
     }
 
     const bytes = readFileSync(absolute);
@@ -362,12 +386,15 @@ export class LocalExecutor implements ComputeExecutor {
     contents: string | Uint8Array,
   ): string {
     if (isAbsolute(relativePath)) {
-      throw new Error('Task outputs must use a path relative to the Task namespace.');
+      throw new NodeExecutionError(
+        'validation',
+        'Task outputs must use a path relative to the Task namespace.',
+      );
     }
     const root = resolve(taskDir);
     const absolute = resolve(root, relativePath);
     if (!isInside(root, absolute)) {
-      throw new Error('Task outputs must stay inside the Task namespace.');
+      throw new NodeExecutionError('validation', 'Task outputs must stay inside the Task namespace.');
     }
     mkdirSync(dirname(absolute), { recursive: true });
     writeFileSync(absolute, contents, { flag: 'wx' });
@@ -388,7 +415,11 @@ export class LocalExecutor implements ComputeExecutor {
 
   private finish(
     job: PersistedJob,
-    patch: Pick<PersistedJob, 'state' | 'exitCode'> & { error?: string; result?: ExecutorTaskResult },
+    patch: Pick<PersistedJob, 'state' | 'exitCode'> & {
+      error?: string;
+      failureKind?: NodeFailureKind;
+      result?: ExecutorTaskResult;
+    },
     log: (line: string) => void,
   ): void {
     this.updateJob(job, patch);
@@ -429,6 +460,7 @@ export class LocalExecutor implements ComputeExecutor {
       state: job.state,
       ...(job.exitCode !== undefined ? { exitCode: job.exitCode } : {}),
       ...(job.error !== undefined ? { error: job.error } : {}),
+      ...(job.failureKind !== undefined ? { failureKind: job.failureKind } : {}),
       logs: readLogLines(job.logsPath),
       ...(job.result ? { result: job.result } : {}),
     };

@@ -6,10 +6,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   createRunSnapshot,
   defaultParameters,
+  NodeExecutionError,
   type Artifact,
   type Metric,
+  type NodeFailureKind,
   type NodeManifest,
   type NodeRegistry,
+  type RetryPolicy,
   type Run,
   type RunEvent,
   type RunFileReference,
@@ -21,6 +24,7 @@ import { builtinManifests, createBuiltinNodeRegistry } from '@sflow/nodes';
 import {
   LocalExecutor,
   Orchestrator,
+  OrchestratorError,
   type NewArtifactRecord,
   type NewMetricRecord,
   type NewRunEvent,
@@ -370,12 +374,70 @@ function queuedRun(snapshot: Run['snapshot'], id = 'run-1'): Run {
 }
 
 function makeOrchestrator(fixture: Fixture, store: MemoryOrchestratorStore): Orchestrator {
+  return makeOrchestratorWith(fixture, store, createBuiltinNodeRegistry());
+}
+
+function makeOrchestratorWith(
+  fixture: Fixture,
+  store: MemoryOrchestratorStore,
+  registry: NodeRegistry,
+  retryWait?: (milliseconds: number, signal: AbortSignal) => Promise<boolean>,
+): Orchestrator {
   const executor = new LocalExecutor({
     projectRoot: fixture.projectRoot,
     jobsDir: join(fixture.projectRoot, '.sflow', 'executor'),
-    registry: createBuiltinNodeRegistry(),
+    registry,
   });
-  return new Orchestrator({ store, executor, pollIntervalMs: 2 });
+  return new Orchestrator({
+    store,
+    executor,
+    pollIntervalMs: 2,
+    ...(retryWait ? { retryWait } : {}),
+  });
+}
+
+/** Overrides one Manifest's RetryPolicy in an otherwise immutable snapshot. */
+function snapshotWithRetry(
+  snapshot: Run['snapshot'],
+  manifestId: string,
+  retry: RetryPolicy,
+): Run['snapshot'] {
+  const cloned = structuredClone(snapshot);
+  const node = cloned.nodes.find((candidate) => candidate.manifestId === manifestId);
+  if (!node) throw new Error(`Missing snapshot Node "${manifestId}"`);
+  node.retry = retry;
+  return cloned;
+}
+
+/**
+ * Test-only failure injection: the selected Node fails with a classified error
+ * for the first `failThroughAttempt` attempts, then behaves normally.
+ */
+function classifiedRegistry(
+  manifestId: string,
+  failureKind: NodeFailureKind,
+  failThroughAttempt = Number.POSITIVE_INFINITY,
+): NodeRegistry {
+  const base = createBuiltinNodeRegistry();
+  return {
+    get(id, version) {
+      const implementation = base.get(id, version);
+      if (!implementation || id !== manifestId) return implementation;
+      return {
+        manifest: implementation.manifest,
+        run(input, parameters, context) {
+          if (context.attempt <= failThroughAttempt) {
+            throw new NodeExecutionError(
+              failureKind,
+              `synthetic ${failureKind} failure on attempt ${context.attempt}`,
+            );
+          }
+          return implementation.run(input, parameters, context);
+        },
+      };
+    },
+    list: () => base.list(),
+  };
 }
 
 async function waitUntil(
@@ -981,5 +1043,572 @@ describe('Orchestrator restart reconciliation', () => {
     const eventsAfterFirst = store.events.length;
     await restarted.reconcileAll();
     expect(store.events).toHaveLength(eventsAfterFirst);
+  });
+});
+
+describe('Orchestrator retry policy', () => {
+  it('shows a queued retry attempt, applies backoff, and completes after a transient failure', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(
+      snapshotWithRetry(fixture.snapshot, 'sequence-design', {
+        maxAttempts: 2,
+        backoffSeconds: 5,
+        retryOn: ['transient'],
+      }),
+    );
+    store.seedRun(run);
+
+    const waits: number[] = [];
+    let releaseRetry!: () => void;
+    const retryGate = new Promise<boolean>((resolve) => {
+      releaseRetry = () => resolve(true);
+    });
+    const orchestrator = makeOrchestratorWith(
+      fixture,
+      store,
+      classifiedRegistry('sequence-design', 'transient', 1),
+      async (milliseconds) => {
+        waits.push(milliseconds);
+        return retryGate;
+      },
+    );
+
+    orchestrator.start(run.id);
+    await waitUntil(
+      () =>
+        store.listTasks(run.id).some(
+          (task) => task.nodeId === NODE_IDS.designer && task.attempt === 2,
+        ),
+      5_000,
+      'the retry attempt to be queued',
+    );
+
+    // While the Run waits for backoff, the failed attempt stays visible and
+    // the next attempt is observable as queued.
+    const waiting = store
+      .listTasks(run.id)
+      .filter((task) => task.nodeId === NODE_IDS.designer)
+      .sort((left, right) => left.attempt - right.attempt);
+    expect(waiting).toHaveLength(2);
+    expect(waiting[0]).toMatchObject({
+      attempt: 1,
+      state: 'failed',
+      failureKind: 'transient',
+      exitCode: 1,
+    });
+    expect(waiting[0].error).toContain('synthetic transient failure');
+    expect(waiting[0].logsAvailable).toBe(true);
+    expect(waiting[1]).toMatchObject({ attempt: 2, state: 'queued' });
+    expect(waits).toEqual([5_000]);
+    expect(store.getRun(run.id)?.status).toBe('running');
+
+    releaseRetry();
+    await orchestrator.whenIdle(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('completed');
+    const designerTasks = store
+      .listTasks(run.id)
+      .filter((task) => task.nodeId === NODE_IDS.designer)
+      .sort((left, right) => left.attempt - right.attempt);
+    expect(designerTasks).toHaveLength(2);
+    expect(designerTasks[0]).toMatchObject({ attempt: 1, state: 'failed' });
+    expect(designerTasks[1]).toMatchObject({ attempt: 2, state: 'completed', exitCode: 0 });
+
+    // Each attempt owns its own logs; the failure history is not rewritten.
+    expect(designerTasks[0].logsPath).not.toBe(designerTasks[1].logsPath);
+    expect(readFileSync(join(fixture.projectRoot, designerTasks[0].logsPath!), 'utf8')).toContain(
+      'state=failed',
+    );
+    expect(readFileSync(join(fixture.projectRoot, designerTasks[1].logsPath!), 'utf8')).toContain(
+      'attempt=2',
+    );
+
+    const retryEvent = store.events.find((event) => event.type === 'task.retry.scheduled');
+    expect(retryEvent).toMatchObject({
+      taskId: designerTasks[1].id,
+      payload: {
+        nodeId: NODE_IDS.designer,
+        attempt: 2,
+        previousAttempt: 1,
+        failureKind: 'transient',
+        backoffSeconds: 5,
+      },
+    });
+    expect(store.events.some((event) => event.type === 'run.failed')).toBe(false);
+  });
+
+  it('never retries parameter errors, even when the policy lists every retryable kind', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(
+      snapshotWithRetry(fixture.snapshot, 'sequence-design', {
+        maxAttempts: 3,
+        backoffSeconds: 0,
+        retryOn: ['transient', 'timeout', 'exit-code'],
+      }),
+    );
+    store.seedRun(run);
+    const waits: number[] = [];
+    const orchestrator = makeOrchestratorWith(
+      fixture,
+      store,
+      classifiedRegistry('sequence-design', 'parameter'),
+      async (milliseconds) => {
+        waits.push(milliseconds);
+        return true;
+      },
+    );
+
+    await orchestrator.run(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('failed');
+    const attempts = store
+      .listTasks(run.id)
+      .filter((task) => task.nodeId === NODE_IDS.designer);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({
+      attempt: 1,
+      state: 'failed',
+      failureKind: 'parameter',
+      exitCode: 1,
+    });
+    expect(waits).toEqual([]);
+    expect(store.events.some((event) => event.type === 'task.retry.scheduled')).toBe(false);
+    expect(store.events.at(-1)?.type).toBe('run.failed');
+  });
+
+  it('fails the Run when the retryable failure exceeds maxAttempts', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(
+      snapshotWithRetry(fixture.snapshot, 'sequence-design', {
+        maxAttempts: 2,
+        backoffSeconds: 0,
+        retryOn: ['timeout'],
+      }),
+    );
+    store.seedRun(run);
+    const waits: number[] = [];
+    const orchestrator = makeOrchestratorWith(
+      fixture,
+      store,
+      classifiedRegistry('sequence-design', 'timeout'),
+      async (milliseconds) => {
+        waits.push(milliseconds);
+        return true;
+      },
+    );
+
+    await orchestrator.run(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('failed');
+    const attempts = store
+      .listTasks(run.id)
+      .filter((task) => task.nodeId === NODE_IDS.designer)
+      .sort((left, right) => left.attempt - right.attempt);
+    expect(attempts.map((task) => task.attempt)).toEqual([1, 2]);
+    expect(attempts.map((task) => task.state)).toEqual(['failed', 'failed']);
+    expect(attempts.map((task) => task.failureKind)).toEqual(['timeout', 'timeout']);
+    // One retry was scheduled between the two declared attempts; no third.
+    expect(waits).toEqual([0]);
+    expect(store.events.filter((event) => event.type === 'task.failed')).toHaveLength(2);
+    expect(store.events.filter((event) => event.type === 'task.retry.scheduled')).toHaveLength(1);
+    expect(store.events.filter((event) => event.type === 'run.failed')).toHaveLength(1);
+  });
+
+  it('resumes a scheduled retry after the Server restarts during backoff', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(
+      snapshotWithRetry(fixture.snapshot, 'sequence-design', {
+        maxAttempts: 2,
+        backoffSeconds: 30,
+        retryOn: ['transient'],
+      }),
+    );
+    store.seedRun(run);
+    const first = makeOrchestratorWith(
+      fixture,
+      store,
+      classifiedRegistry('sequence-design', 'transient', 1),
+      (milliseconds, signal) => {
+        expect(milliseconds).toBe(30_000);
+        // The backoff never elapses in this process: the Server stops while
+        // waiting, exactly like a crash between attempt scheduling and retry.
+        return new Promise<boolean>((resolve) => {
+          if (signal.aborted) resolve(false);
+          else signal.addEventListener('abort', () => resolve(false), { once: true });
+        });
+      },
+    );
+    first.start(run.id);
+    await waitUntil(
+      () =>
+        store.listTasks(run.id).some(
+          (task) =>
+            task.nodeId === NODE_IDS.designer && task.attempt === 2 && task.state === 'queued',
+        ),
+      5_000,
+      'the retry attempt to be queued',
+    );
+    await first.close();
+
+    // Closing stops monitoring without canceling work; persisted state stays
+    // active so the next Server process can resume it.
+    expect(store.getRun(run.id)?.status).toBe('running');
+    expect(
+      store
+        .listTasks(run.id)
+        .filter((task) => task.nodeId === NODE_IDS.designer)
+        .map((task) => task.state),
+    ).toEqual(['failed', 'queued']);
+
+    const restarted = makeOrchestratorWith(
+      fixture,
+      store,
+      classifiedRegistry('sequence-design', 'transient', 1),
+    );
+    await restarted.reconcileAll();
+    await restarted.whenIdle(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('completed');
+    const attempts = store
+      .listTasks(run.id)
+      .filter((task) => task.nodeId === NODE_IDS.designer)
+      .sort((left, right) => left.attempt - right.attempt);
+    expect(attempts.map((task) => [task.attempt, task.state])).toEqual([
+      [1, 'failed'],
+      [2, 'completed'],
+    ]);
+  });
+});
+
+describe('Orchestrator cancellation', () => {
+  it('cancels queued work, requests running jobs to stop, and leaves completed science unchanged', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(fixture.snapshot);
+    store.seedRun(run);
+
+    const interrupted = interruptedRegistry('candidate-generation');
+    const executor = new LocalExecutor({
+      projectRoot: fixture.projectRoot,
+      jobsDir: join(fixture.projectRoot, '.sflow', 'executor'),
+      registry: interrupted.registry,
+    });
+    const orchestrator = new Orchestrator({ store, executor, pollIntervalMs: 2 });
+
+    orchestrator.start(run.id);
+    await interrupted.waitForJob();
+    await waitUntil(
+      () =>
+        store.listTasks(run.id).find((task) => task.nodeId === NODE_IDS.target)?.state ===
+        'completed',
+      5_000,
+      'the target Task to complete',
+    );
+    await waitUntil(
+      () =>
+        store.listTasks(run.id).some(
+          (task) => task.nodeId === NODE_IDS.generator && task.state === 'running',
+        ),
+      5_000,
+      'the generator Task to start',
+    );
+
+    const completedBefore = store
+      .listTasks(run.id)
+      .filter((task) => task.state === 'completed');
+    const artifactsBefore = structuredClone(store.artifacts);
+    const metricsBefore = structuredClone(store.metrics);
+    expect(completedBefore).toHaveLength(1);
+    expect(artifactsBefore.length).toBeGreaterThan(0);
+    const runningBefore = store
+      .listTasks(run.id)
+      .find((task) => task.nodeId === NODE_IDS.generator)!;
+
+    const canceled = await orchestrator.cancelRun(run.id);
+    expect(canceled.status).toBe('canceled');
+    await orchestrator.whenIdle(run.id);
+
+    // Completed Tasks and their scientific records are untouched.
+    for (const completed of completedBefore) {
+      expect(store.getTask(completed.id)).toMatchObject({
+        state: 'completed',
+        exitCode: 0,
+        completedAt: completed.completedAt,
+      });
+    }
+    expect(store.artifacts).toEqual(artifactsBefore);
+    expect(store.metrics).toEqual(metricsBefore);
+
+    // The running attempt was asked to stop through the executor and the
+    // queued downstream attempts were canceled without ever executing.
+    const tasks = store.listTasks(run.id);
+    const generator = tasks.find((task) => task.id === runningBefore.id)!;
+    expect(generator).toMatchObject({ state: 'canceled', exitCode: 130 });
+    for (const nodeId of [NODE_IDS.designer, NODE_IDS.predictor, NODE_IDS.comparison]) {
+      expect(
+        tasks.filter((task) => task.nodeId === nodeId).map((task) => task.state),
+      ).toEqual(['canceled']);
+    }
+    const jobs = (await executor.reconcile(run.id)).jobs;
+    expect(jobs.find((job) => job.jobId === runningBefore.jobId)?.state).toBe('canceled');
+
+    // Cancellation events make the transition explainable.
+    expect(
+      store.events.filter((event) => event.type === 'task.canceled'),
+    ).toHaveLength(4);
+    expect(store.events.filter((event) => event.type === 'run.canceled')).toHaveLength(1);
+    expect(store.events.at(-1)?.type).toBe('run.canceled');
+
+    // Cancellation is idempotent and safe on terminal Runs.
+    const eventsAfter = store.events.length;
+    const again = await orchestrator.cancelRun(run.id);
+    expect(again.status).toBe('canceled');
+    expect(store.events).toHaveLength(eventsAfter);
+    expect(store.listTasks(run.id)).toEqual(tasks);
+  });
+
+  it('cancels a Run waiting out a retry backoff without starting the queued attempt', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(
+      snapshotWithRetry(fixture.snapshot, 'sequence-design', {
+        maxAttempts: 2,
+        backoffSeconds: 30,
+        retryOn: ['transient'],
+      }),
+    );
+    store.seedRun(run);
+
+    const waits: Array<AbortSignal> = [];
+    const orchestrator = makeOrchestratorWith(
+      fixture,
+      store,
+      classifiedRegistry('sequence-design', 'transient', 1),
+      (milliseconds, signal) => {
+        expect(milliseconds).toBe(30_000);
+        waits.push(signal);
+        return new Promise<boolean>((resolve) => {
+          if (signal.aborted) resolve(false);
+          else signal.addEventListener('abort', () => resolve(false), { once: true });
+        });
+      },
+    );
+
+    orchestrator.start(run.id);
+    await waitUntil(
+      () =>
+        waits.length === 1 &&
+        store.listTasks(run.id).some(
+          (task) =>
+            task.nodeId === NODE_IDS.designer && task.attempt === 2 && task.state === 'queued',
+        ),
+      5_000,
+      'the retry attempt to be queued and its backoff to start',
+    );
+
+    const canceled = await orchestrator.cancelRun(run.id);
+    expect(canceled.status).toBe('canceled');
+    await orchestrator.whenIdle(run.id);
+
+    const designer = store
+      .listTasks(run.id)
+      .filter((task) => task.nodeId === NODE_IDS.designer)
+      .sort((left, right) => left.attempt - right.attempt);
+    expect(designer.map((task) => [task.attempt, task.state])).toEqual([
+      [1, 'failed'],
+      [2, 'canceled'],
+    ]);
+    expect(store.getRun(run.id)?.status).toBe('canceled');
+    // The queued retry attempt never reached the executor.
+    const jobs = (await new LocalExecutor({
+      projectRoot: fixture.projectRoot,
+      jobsDir: join(fixture.projectRoot, '.sflow', 'executor'),
+      registry: createBuiltinNodeRegistry(),
+    }).reconcile(run.id)).jobs;
+    expect(jobs.filter((job) => job.attempt === 2 && job.nodeId === NODE_IDS.designer)).toEqual(
+      [],
+    );
+  });
+
+  it('reruns a canceled Task as a new attempt and completes the remaining plan', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(fixture.snapshot);
+    store.seedRun(run);
+
+    const interrupted = interruptedRegistry('candidate-generation');
+    const orchestrator = makeOrchestratorWith(fixture, store, interrupted.registry);
+    orchestrator.start(run.id);
+    await interrupted.waitForJob();
+    await waitUntil(
+      () =>
+        store.listTasks(run.id).some(
+          (task) => task.nodeId === NODE_IDS.generator && task.state === 'running',
+        ),
+      5_000,
+      'the generator Task to start',
+    );
+    await orchestrator.cancelRun(run.id);
+    await orchestrator.whenIdle(run.id);
+
+    const canceledDesigner = store
+      .listTasks(run.id)
+      .find(
+        (task) => task.nodeId === NODE_IDS.designer && task.attempt === 1 && task.state === 'canceled',
+      )!;
+    expect(canceledDesigner).toBeDefined();
+
+    const { run: resumed, task: rerunTask } = await orchestrator.rerunTask(
+      run.id,
+      canceledDesigner.id,
+    );
+    expect(resumed.status).toBe('running');
+    expect(rerunTask).toMatchObject({
+      nodeId: NODE_IDS.designer,
+      attempt: 2,
+      state: 'queued',
+    });
+
+    await orchestrator.whenIdle(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('completed');
+    // Canceled history stays visible; the replanned work is a new attempt.
+    expect(store.getTask(canceledDesigner.id)).toMatchObject({
+      attempt: 1,
+      state: 'canceled',
+    });
+    for (const nodeId of [
+      NODE_IDS.generator,
+      NODE_IDS.designer,
+      NODE_IDS.predictor,
+      NODE_IDS.comparison,
+    ]) {
+      const attempts = store
+        .listTasks(run.id)
+        .filter((task) => task.nodeId === nodeId)
+        .sort((left, right) => left.attempt - right.attempt);
+      expect(attempts.at(-1)).toMatchObject({ attempt: 2, state: 'completed' });
+    }
+    // Completed work was reused, not repeated.
+    expect(
+      store.listTasks(run.id).filter((task) => task.nodeId === NODE_IDS.target),
+    ).toHaveLength(1);
+    expect(store.events.filter((event) => event.type === 'run.rerun')).toHaveLength(1);
+  });
+});
+
+describe('Orchestrator explicit rerun', () => {
+  it('creates a new attempt for a failed Task while retaining its failure history', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(
+      snapshotWithRetry(fixture.snapshot, 'sequence-design', {
+        maxAttempts: 1,
+        backoffSeconds: 0,
+        retryOn: [],
+      }),
+    );
+    store.seedRun(run);
+
+    const orchestrator = makeOrchestratorWith(
+      fixture,
+      store,
+      classifiedRegistry('sequence-design', 'parameter', 1),
+    );
+    await orchestrator.run(run.id);
+    expect(store.getRun(run.id)?.status).toBe('failed');
+
+    const failed = store
+      .listTasks(run.id)
+      .find((task) => task.nodeId === NODE_IDS.designer)!;
+    expect(failed).toMatchObject({ attempt: 1, state: 'failed', failureKind: 'parameter' });
+    const failedLogsPath = failed.logsPath!;
+    const completedBefore = store
+      .listTasks(run.id)
+      .filter((task) => task.state === 'completed')
+      .map((task) => ({ id: task.id, nodeId: task.nodeId }));
+    expect(completedBefore).toHaveLength(2);
+
+    const { run: resumed, task: rerunTask } = await orchestrator.rerunTask(run.id, failed.id);
+    expect(resumed.status).toBe('running');
+    expect(rerunTask).toMatchObject({
+      nodeId: NODE_IDS.designer,
+      attempt: 2,
+      state: 'queued',
+    });
+
+    await orchestrator.whenIdle(run.id);
+
+    expect(store.getRun(run.id)?.status).toBe('completed');
+    // The original failure record and its logs are immutable.
+    expect(store.getTask(failed.id)).toMatchObject({
+      attempt: 1,
+      state: 'failed',
+      failureKind: 'parameter',
+      exitCode: 1,
+      error: failed.error,
+      completedAt: failed.completedAt,
+    });
+    expect(store.getTask(failed.id)?.logsPath).toBe(failedLogsPath);
+    expect(readFileSync(join(fixture.projectRoot, failedLogsPath), 'utf8')).toContain(
+      'synthetic parameter failure on attempt 1',
+    );
+
+    // Upstream completed work is reused; the failed Node and its downstream
+    // work run again as new attempts.
+    for (const completed of completedBefore) {
+      expect(store.getTask(completed.id)).toMatchObject({
+        id: completed.id,
+        state: 'completed',
+      });
+    }
+    for (const nodeId of [NODE_IDS.designer, NODE_IDS.predictor, NODE_IDS.comparison]) {
+      expect(
+        store
+          .listTasks(run.id)
+          .filter((task) => task.nodeId === nodeId && task.state === 'completed'),
+      ).toHaveLength(1);
+    }
+    expect(store.events.filter((event) => event.type === 'run.rerun')).toHaveLength(1);
+    expect(store.events.at(-1)?.type).toBe('run.completed');
+  });
+
+  it('rejects rerunning a completed Task and a superseded attempt', async () => {
+    const fixture = binderFixture();
+    const store = new MemoryOrchestratorStore(fixture.projectRoot);
+    const run = queuedRun(
+      snapshotWithRetry(fixture.snapshot, 'sequence-design', {
+        maxAttempts: 1,
+        backoffSeconds: 0,
+        retryOn: [],
+      }),
+    );
+    store.seedRun(run);
+    const orchestrator = makeOrchestratorWith(
+      fixture,
+      store,
+      classifiedRegistry('sequence-design', 'parameter', 1),
+    );
+    await orchestrator.run(run.id);
+
+    const completedTask = store
+      .listTasks(run.id)
+      .find((task) => task.nodeId === NODE_IDS.target)!;
+    await expect(orchestrator.rerunTask(run.id, completedTask.id)).rejects.toMatchObject({
+      code: 'TASK_COMPLETED',
+    });
+
+    const failed = store
+      .listTasks(run.id)
+      .find((task) => task.nodeId === NODE_IDS.designer)!;
+    await orchestrator.rerunTask(run.id, failed.id);
+    await orchestrator.whenIdle(run.id);
+    await expect(orchestrator.rerunTask(run.id, failed.id)).rejects.toMatchObject({
+      code: 'TASK_SUPERSEDED',
+    });
   });
 });

@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { NodeRegistry } from '@sflow/domain';
+import type { NodeImplementation, NodeRegistry } from '@sflow/domain';
 import { createProjectServer, type ProjectServer } from '@sflow/server';
 
 export interface TestServerHandle {
@@ -20,6 +20,8 @@ export interface BootTestServerOptions {
   webDist?: string;
   executorDelayMs?: number;
   registry?: NodeRegistry;
+  nodeImplementations?: readonly NodeImplementation[];
+  retryWait?: (milliseconds: number, signal: AbortSignal) => Promise<boolean>;
 }
 
 /**
@@ -35,6 +37,10 @@ export async function bootTestServer(options: BootTestServerOptions = {}): Promi
     webDist: options.webDist,
     executorDelayMs: options.executorDelayMs,
     ...(options.registry ? { registry: options.registry } : {}),
+    ...(options.nodeImplementations
+      ? { nodeImplementations: options.nodeImplementations }
+      : {}),
+    ...(options.retryWait ? { retryWait: options.retryWait } : {}),
   });
   const { url } = await server.listen(0, '127.0.0.1');
 

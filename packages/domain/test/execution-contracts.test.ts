@@ -4,13 +4,16 @@ import {
   CandidateSchema,
   CandidateSetSchema,
   MetricSchema,
+  NodeExecutionError,
   ProvenanceSchema,
   RunDetailResponseSchema,
+  shouldRetryTask,
   TaskSchema,
   TASK_STATES,
   type Artifact,
   type Metric,
   type Provenance,
+  type RetryPolicy,
   type Run,
   type Task,
 } from '@sflow/domain';
@@ -192,5 +195,77 @@ describe('execution domain contracts', () => {
     expect(
       RunDetailResponseSchema.safeParse({ ...detail, tasks: [{ ...task, attempt: -2 }] }).success,
     ).toBe(false);
+  });
+
+  it('retries only Manifest-declared retryable failures within the attempt limit', () => {
+    const transient: RetryPolicy = {
+      maxAttempts: 2,
+      backoffSeconds: 30,
+      retryOn: ['transient', 'exit-code'],
+    };
+
+    // The first attempt may be retried; the last declared attempt may not.
+    expect(shouldRetryTask(transient, 1, 'transient')).toBe(true);
+    expect(shouldRetryTask(transient, 1, 'exit-code')).toBe(true);
+    expect(shouldRetryTask(transient, 2, 'transient')).toBe(false);
+    expect(shouldRetryTask({ ...transient, maxAttempts: 1 }, 1, 'transient')).toBe(false);
+
+    // Only kinds declared by the policy are retryable.
+    expect(shouldRetryTask(transient, 1, 'timeout')).toBe(false);
+    expect(
+      shouldRetryTask({ ...transient, retryOn: ['timeout'] }, 1, 'timeout'),
+    ).toBe(true);
+
+    // Parameter and validation errors are never retried, even if a policy
+    // accidentally lists every retryable kind.
+    for (const kind of ['parameter', 'validation', 'unknown'] as const) {
+      expect(
+        shouldRetryTask(
+          { maxAttempts: 5, backoffSeconds: 0, retryOn: ['transient', 'timeout', 'exit-code'] },
+          1,
+          kind,
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it('classifies Node failures so parameter errors are distinguishable from transient failures', () => {
+    const parameter = new NodeExecutionError('parameter', 'Parameter "seed" must be an integer.');
+    expect(parameter).toBeInstanceOf(Error);
+    expect(parameter.message).toBe('Parameter "seed" must be an integer.');
+    expect(parameter.failureKind).toBe('parameter');
+
+    const transient = new NodeExecutionError('transient', 'The scheduler connection dropped.');
+    expect(transient.failureKind).toBe('transient');
+
+    expect(shouldRetryTask({ maxAttempts: 2, backoffSeconds: 0, retryOn: ['transient'] }, 1, parameter.failureKind)).toBe(false);
+    expect(shouldRetryTask({ maxAttempts: 2, backoffSeconds: 0, retryOn: ['transient'] }, 1, transient.failureKind)).toBe(true);
+  });
+
+  it('exposes the failure classification and retry history on a Task attempt', () => {
+    const failed = {
+      ...task,
+      attempt: 1,
+      state: 'failed' as const,
+      failureKind: 'transient' as const,
+      exitCode: 1,
+      error: 'The scheduler connection dropped.',
+    };
+    expect(TaskSchema.parse(failed)).toEqual(failed);
+    expect(TaskSchema.safeParse({ ...failed, failureKind: 'meteor' }).success).toBe(false);
+
+    const awaitingRetry = {
+      ...task,
+      id: 'task-2',
+      attempt: 2,
+      state: 'queued' as const,
+      jobId: undefined,
+      logsAvailable: false,
+      logsPath: undefined,
+      exitCode: undefined,
+      completedAt: undefined,
+      startedAt: undefined,
+    };
+    expect(TaskSchema.parse(awaitingRetry)).toMatchObject({ attempt: 2, state: 'queued' });
   });
 });

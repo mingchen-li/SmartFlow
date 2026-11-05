@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   CandidateSetSchema,
   ComparisonReportSchema,
+  NodeExecutionError,
   TargetStructureSchema,
   defaultParameters,
   type CandidateSet,
@@ -246,6 +247,49 @@ describe('built-in deterministic Node implementations', () => {
         harness,
       ),
     ).toThrow(/missing\.pdb/);
+  });
+
+  it('classifies parameter and input errors as non-retryable Node failures', () => {
+    const harness = makeHarness();
+    const capture = (run: () => unknown): unknown => {
+      try {
+        run();
+      } catch (error) {
+        return error;
+      }
+      throw new Error('Expected the Node implementation to throw.');
+    };
+
+    const parameterFailure = capture(() =>
+      runNode(
+        'candidate-generation',
+        {},
+        { ...defaults('candidate-generation'), numCandidates: 0 },
+        harness,
+      ),
+    );
+    expect(parameterFailure).toBeInstanceOf(NodeExecutionError);
+    expect((parameterFailure as NodeExecutionError).failureKind).toBe('parameter');
+
+    const inputFailure = capture(() =>
+      runNode('sequence-design', {}, defaults('sequence-design'), harness),
+    );
+    expect(inputFailure).toBeInstanceOf(NodeExecutionError);
+    expect((inputFailure as NodeExecutionError).failureKind).toBe('validation');
+
+    const missingFile = capture(() =>
+      runNode(
+        'target-input',
+        {},
+        {
+          ...defaults('target-input'),
+          targetFile: { fileReferenceId: 'file-1', path: 'missing.pdb' },
+        },
+        harness,
+      ),
+    );
+    expect(missingFile).toBeInstanceOf(NodeExecutionError);
+    expect((missingFile as NodeExecutionError).failureKind).toBe('validation');
   });
 
   it('generates deterministic CandidateSets for a given seed and different ones for another seed', () => {

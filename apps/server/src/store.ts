@@ -89,6 +89,7 @@ interface TaskRow {
   logs_available: number;
   exit_code: number | null;
   error: string | null;
+  failure_kind: string | null;
   outputs_json: string | null;
   created_at: string;
   started_at: string | null;
@@ -550,7 +551,7 @@ export class ProjectStore implements OrchestratorStore {
     const rows = this.db
       .prepare(
         `SELECT id, run_id, node_id, label, manifest_id, manifest_version, state, attempt,
-                job_id, logs_path, logs_available, exit_code, error, outputs_json,
+                job_id, logs_path, logs_available, exit_code, error, failure_kind, outputs_json,
                 created_at, started_at, completed_at, updated_at
          FROM tasks WHERE run_id = ? ORDER BY rowid ASC`,
       )
@@ -566,7 +567,7 @@ export class ProjectStore implements OrchestratorStore {
     const row = this.db
       .prepare(
         `SELECT id, run_id, node_id, label, manifest_id, manifest_version, state, attempt,
-                job_id, logs_path, logs_available, exit_code, error, outputs_json,
+                job_id, logs_path, logs_available, exit_code, error, failure_kind, outputs_json,
                 created_at, started_at, completed_at, updated_at
          FROM tasks WHERE id = ?`,
       )
@@ -585,9 +586,9 @@ export class ProjectStore implements OrchestratorStore {
       .prepare(
         `INSERT INTO tasks (
            id, run_id, node_id, label, manifest_id, manifest_version, state, attempt,
-           job_id, logs_path, logs_available, exit_code, error, outputs_json,
+           job_id, logs_path, logs_available, exit_code, error, failure_kind, outputs_json,
            created_at, started_at, completed_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, NULL, NULL, NULL, ?, NULL, NULL, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, NULL, NULL, NULL, NULL, ?, NULL, NULL, ?)`,
       )
       .run(
         id,
@@ -620,6 +621,7 @@ export class ProjectStore implements OrchestratorStore {
       ...(logsPath !== undefined ? { logsPath } : {}),
       ...(patch.exitCode !== undefined ? { exitCode: patch.exitCode } : {}),
       ...(patch.error !== undefined ? { error: patch.error } : {}),
+      ...(patch.failureKind !== undefined ? { failureKind: patch.failureKind } : {}),
       ...(patch.startedAt !== undefined ? { startedAt: patch.startedAt } : {}),
       ...(patch.completedAt !== undefined ? { completedAt: patch.completedAt } : {}),
       logsAvailable: this.logFileAvailable(logsPath ?? null),
@@ -630,7 +632,7 @@ export class ProjectStore implements OrchestratorStore {
       .prepare(
         `UPDATE tasks SET
            state = ?, job_id = ?, logs_path = ?, logs_available = ?, exit_code = ?,
-           error = ?, started_at = ?, completed_at = ?, updated_at = ?
+           error = ?, failure_kind = ?, started_at = ?, completed_at = ?, updated_at = ?
          WHERE id = ?`,
       )
       .run(
@@ -640,6 +642,7 @@ export class ProjectStore implements OrchestratorStore {
         merged.logsAvailable ? 1 : 0,
         merged.exitCode ?? null,
         merged.error ?? null,
+        merged.failureKind ?? null,
         merged.startedAt ?? null,
         merged.completedAt ?? null,
         merged.updatedAt,
@@ -932,6 +935,7 @@ export class ProjectStore implements OrchestratorStore {
         ...(row.logs_path ? { logsPath: row.logs_path } : {}),
         ...(row.exit_code !== null ? { exitCode: row.exit_code } : {}),
         ...(row.error ? { error: row.error } : {}),
+        ...(row.failure_kind ? { failureKind: row.failure_kind } : {}),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         ...(row.started_at ? { startedAt: row.started_at } : {}),
@@ -1134,6 +1138,7 @@ export class ProjectStore implements OrchestratorStore {
         logs_available INTEGER NOT NULL DEFAULT 0,
         exit_code INTEGER,
         error TEXT,
+        failure_kind TEXT,
         outputs_json TEXT,
         created_at TEXT NOT NULL,
         started_at TEXT,
@@ -1231,6 +1236,7 @@ export class ProjectStore implements OrchestratorStore {
     this.ensureColumn('tasks', 'logs_available', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('tasks', 'exit_code', 'INTEGER');
     this.ensureColumn('tasks', 'error', 'TEXT');
+    this.ensureColumn('tasks', 'failure_kind', 'TEXT');
     this.ensureColumn('tasks', 'outputs_json', 'TEXT');
     this.ensureColumn('tasks', 'created_at', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('tasks', 'started_at', 'TEXT');

@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import {
   BINDER_REQUIRED_OUTPUTS,
   CreateRunRequestSchema,
+  RerunTaskRequestSchema,
   RunArtifactParamsSchema,
   RunEventsQuerySchema,
   RunParamsSchema,
@@ -13,6 +14,8 @@ import {
   createRunSnapshot,
   validateResultViewBindings,
   validateWorkflow,
+  type CancelRunResponse,
+  type RerunTaskResponse,
   type ResultViewIR,
   type NodeManifest,
   type ResultViewResponse,
@@ -22,7 +25,7 @@ import {
   type TaskLogsResponse,
 } from '@sflow/domain';
 import { builtinManifests } from '@sflow/nodes';
-import type { Orchestrator } from '@sflow/orchestrator';
+import { OrchestratorError, type Orchestrator } from '@sflow/orchestrator';
 import { HttpError, parseOrThrow } from './errors';
 import type { ProjectStore } from './store';
 import { builtinWidgetDescriptors } from './widgets';
@@ -234,4 +237,55 @@ export function registerRunRoutes(
     }
     return { events: store.listEvents(id, after) };
   });
+
+  /**
+   * Cancels queued work, requests running executor jobs to stop, and closes
+   * the Run as canceled. Safe to call on a terminal Run: the response is the
+   * unchanged Run and no history is rewritten.
+   */
+  app.post('/api/runs/:id/cancel', async (request): Promise<CancelRunResponse> => {
+    const { id } = parseOrThrow(RunParamsSchema, request.params);
+    const run = store.getRun(id);
+    if (!run) {
+      throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
+    }
+    try {
+      return { run: await orchestrator.cancelRun(id) };
+    } catch (error) {
+      throw toHttpError(error);
+    }
+  });
+
+  /**
+   * Explicitly reruns a failed or canceled Task attempt. The new attempt is
+   * queued and the Run resumes; the original attempt and logs stay visible.
+   */
+  app.post(
+    '/api/runs/:id/tasks/:taskId/rerun',
+    async (request): Promise<RerunTaskResponse> => {
+      const { id, taskId } = parseOrThrow(RunTaskParamsSchema, request.params);
+      parseOrThrow(RerunTaskRequestSchema, request.body ?? {});
+      const run = store.getRun(id);
+      if (!run) {
+        throw new HttpError(404, 'NOT_FOUND', 'Run not found.');
+      }
+      const task = store.getTask(taskId);
+      if (!task || task.runId !== id) {
+        throw new HttpError(404, 'NOT_FOUND', 'Task not found.');
+      }
+      try {
+        const result = await orchestrator.rerunTask(id, taskId);
+        return { run: result.run, task: result.task };
+      } catch (error) {
+        throw toHttpError(error);
+      }
+    },
+  );
+}
+
+function toHttpError(error: unknown): HttpError {
+  if (error instanceof OrchestratorError) {
+    return new HttpError(409, error.code, error.message);
+  }
+  throw error;
 }

@@ -4,6 +4,7 @@ import type {
   FileReference,
   FileReferenceListResponse,
   LoginResponse,
+  NodeCatalogResponse,
   Project,
   RotateCredentialResponse,
   SaveWorkflowDraftRequest,
@@ -103,6 +104,10 @@ export function registerFileReference(path: string): Promise<FileReference> {
 
 export function listFileReferences(): Promise<FileReferenceListResponse> {
   return apiGet<FileReferenceListResponse>('/api/files/references');
+}
+
+export function listNodeManifests(): Promise<NodeCatalogResponse> {
+  return apiGet<NodeCatalogResponse>('/api/nodes');
 }
 
 export function getWorkflow(id: string): Promise<WorkflowDraft> {

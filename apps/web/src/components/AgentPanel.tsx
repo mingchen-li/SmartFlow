@@ -1,5 +1,8 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
+import { findManifest, type FileReference, type NodeManifest } from '@sflow/domain';
+import { useEditorStore } from '../store/editor';
+import { NodeInspector } from './NodeInspector';
 
 type AgentContext = 'workflow' | 'node';
 
@@ -12,13 +15,21 @@ interface AgentMessage {
 export interface AgentPanelProps {
   width: number;
   onCollapse: () => void;
+  manifests: readonly NodeManifest[];
+  fileReferences: readonly FileReference[];
 }
 
 /**
- * Agent surface shell: context switch, conversation history, and a fixed
- * composer. Node selection will drive the context once the canvas exists.
+ * Agent surface: context switch, conversation history, generated Node
+ * configuration for the selected Node, and a fixed composer. Model responses
+ * and Agent-driven edits land in ticket #15.
  */
-export function AgentPanel({ width, onCollapse }: AgentPanelProps) {
+export function AgentPanel({
+  width,
+  onCollapse,
+  manifests,
+  fileReferences,
+}: AgentPanelProps) {
   const [context, setContext] = useState<AgentContext>('workflow');
   const [composer, setComposer] = useState('');
   const nextMessageId = useRef(2);
@@ -29,6 +40,20 @@ export function AgentPanel({ width, onCollapse }: AgentPanelProps) {
       text: 'Ask about this Binder design Workflow. Selecting a Node will switch me into that Node context.',
     },
   ]);
+
+  const workflow = useEditorStore((state) => state.workflow);
+  const selectedNodeId = useEditorStore((state) => state.layout.selection.nodeId);
+  const selectedNode =
+    selectedNodeId === null
+      ? undefined
+      : workflow.nodes.find((node) => node.id === selectedNodeId);
+  const selectedManifest = selectedNode
+    ? findManifest(manifests, selectedNode.manifestId, selectedNode.manifestVersion)
+    : undefined;
+
+  useEffect(() => {
+    if (selectedNodeId) setContext('node');
+  }, [selectedNodeId]);
 
   function send(): void {
     const text = composer.trim();
@@ -108,6 +133,14 @@ export function AgentPanel({ width, onCollapse }: AgentPanelProps) {
           </div>
         ))}
       </div>
+
+      {selectedNode && selectedManifest ? (
+        <NodeInspector
+          instance={selectedNode}
+          manifest={selectedManifest}
+          fileReferences={fileReferences}
+        />
+      ) : null}
 
       <div className="agent-composer">
         <label className="sr-only" htmlFor="agent-composer">

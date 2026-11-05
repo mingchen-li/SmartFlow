@@ -7,6 +7,7 @@ import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { registerAuthGuard, registerAuthRoutes } from './auth';
 import { installErrorHandler } from './errors';
+import { registerNodeRoutes } from './nodes';
 import { registerPages } from './pages';
 import { SessionService } from './session';
 import { ProjectStore } from './store';
@@ -61,6 +62,7 @@ export async function createProjectServer(
 
   registerAuthGuard(app, session);
   registerAuthRoutes(app, store, session);
+  registerNodeRoutes(app);
   registerWorkspaceRoutes(app, store);
   registerTerminalRoute(app, store);
   registerPages(app, session, webDist);

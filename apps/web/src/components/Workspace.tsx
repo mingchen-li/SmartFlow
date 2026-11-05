@@ -1,13 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { FileReference, Project } from '@sflow/domain';
+import {
+  createEmptyEditorLayout,
+  createEmptyWorkflow,
+  EditorLayoutSchema,
+  WorkflowIRSchema,
+  type FileReference,
+  type NodeManifest,
+  type Project,
+} from '@sflow/domain';
 import {
   ApiError,
   getWorkflow,
   listFileReferences,
+  listNodeManifests,
   registerFileReference,
-  saveWorkflow,
 } from '../api';
+import { useDraftAutosave } from '../editor/useDraftAutosave';
 import { useMediaQuery } from '../hooks/useMediaQuery';
+import { useEditorStore } from '../store/editor';
 import { useLayoutStore } from '../store/layout';
 import { AgentPanel } from './AgentPanel';
 import { FileExplorer } from './FileExplorer';
@@ -22,20 +32,6 @@ import { WorkflowSurface } from './WorkflowSurface';
 
 export const WORKFLOW_DRAFT_ID = 'binder-design';
 
-export interface DraftState {
-  name: string;
-  workflow: Record<string, unknown>;
-  layout: Record<string, unknown>;
-}
-
-const EMPTY_DRAFT: DraftState = {
-  name: 'Binder design',
-  workflow: { version: 1, nodes: [], edges: [] },
-  layout: {},
-};
-
-export type SaveState = 'idle' | 'saving' | 'saved' | 'error';
-
 export interface WorkspaceProps {
   project: Project;
   onSignedOut: () => void;
@@ -43,19 +39,26 @@ export interface WorkspaceProps {
 
 /**
  * Fixed-viewport Project workspace: global toolbar, product navigation, file
- * explorer, editor/monitor stack, and Agent surface. Panel geometry lives in
- * the layout store and never enters the Workflow draft.
+ * explorer, editor/monitor stack, and Agent surface. Workflow IR and
+ * EditorLayout are persisted with the draft; panel geometry, maximize mode,
+ * Node Library state, and selection presentation are app state outside it.
  */
 export function Workspace({ project, onSignedOut }: WorkspaceProps) {
   const [activeSection, setActiveSection] = useState<WorkspaceSection>('workflows');
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
   const [selectedReference, setSelectedReference] = useState<FileReference | null>(null);
   const [fileReferences, setFileReferences] = useState<FileReference[]>([]);
+  const [manifests, setManifests] = useState<NodeManifest[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const [draft, setDraft] = useState<DraftState>(EMPTY_DRAFT);
-  const [saveState, setSaveState] = useState<SaveState>('idle');
   const selectedPathRef = useRef<string | null>(null);
+  const wasMaximizedRef = useRef(false);
+
+  const draftName = useEditorStore((state) => state.draftName);
+  const saveState = useEditorStore((state) => state.saveState);
+  const maximize = useEditorStore((state) => state.maximize);
+  const hydrate = useEditorStore((state) => state.hydrate);
+  const setLibraryOpen = useEditorStore((state) => state.setLibraryOpen);
 
   const agentWidth = useLayoutStore((state) => state.agentWidth);
   const explorerCollapsed = useLayoutStore((state) => state.explorerCollapsed);
@@ -74,6 +77,18 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
     setToast(message);
   }, []);
 
+  const handleAutosaved = useCallback(() => notify('Draft saved.'), [notify]);
+  const handleAutosaveError = useCallback(
+    () => notify('The Workflow draft could not be saved.'),
+    [notify],
+  );
+
+  const { saveNow } = useDraftAutosave({
+    draftId: WORKFLOW_DRAFT_ID,
+    onSaved: handleAutosaved,
+    onError: handleAutosaveError,
+  });
+
   useEffect(() => {
     if (!toast) return;
     const timeout = window.setTimeout(() => setToast(null), 4_000);
@@ -90,19 +105,43 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
     setAgentCollapsed(veryNarrow);
   }, [veryNarrow, setAgentCollapsed]);
 
+  // Hydrate the editor document from the persisted draft. Unknown or older
+  // layouts fall back safely; a 404 starts a new draft.
   useEffect(() => {
+    let cancelled = false;
+
     getWorkflow(WORKFLOW_DRAFT_ID)
       .then((saved) => {
-        setDraft({
+        if (cancelled) return;
+        const workflow = WorkflowIRSchema.safeParse(saved.workflow);
+        const layout = EditorLayoutSchema.safeParse(saved.layout);
+        hydrate({
           name: saved.name,
-          workflow: saved.workflow,
-          layout: saved.layout,
+          workflow: workflow.success ? workflow.data : createEmptyWorkflow(),
+          layout: layout.success ? layout.data : createEmptyEditorLayout(),
         });
       })
       .catch((error: unknown) => {
-        if (error instanceof ApiError && error.status === 404) return;
-        notify('The Workflow draft could not be loaded.');
+        if (cancelled) return;
+        if (!(error instanceof ApiError && error.status === 404)) {
+          notify('The Workflow draft could not be loaded.');
+        }
+        hydrate({
+          name: 'Binder design',
+          workflow: createEmptyWorkflow(),
+          layout: createEmptyEditorLayout(),
+        });
       });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrate, notify]);
+
+  useEffect(() => {
+    listNodeManifests()
+      .then((response) => setManifests([...response.nodes]))
+      .catch(() => notify('Node Manifests could not be loaded.'));
   }, [notify]);
 
   useEffect(() => {
@@ -118,6 +157,31 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
       })
       .catch(() => notify('File References could not be loaded.'));
   }, [notify]);
+
+  // App-level maximize, not the browser Fullscreen API. Escape exits and the
+  // toolbar toggle regains focus.
+  useEffect(() => {
+    if (!maximize) {
+      if (wasMaximizedRef.current) {
+        wasMaximizedRef.current = false;
+        document
+          .querySelector<HTMLElement>('[data-testid="toggle-maximize"]')
+          ?.focus();
+      }
+      return;
+    }
+
+    wasMaximizedRef.current = true;
+    function onKeyDown(event: KeyboardEvent): void {
+      if (event.key !== 'Escape') return;
+      if (useEditorStore.getState().libraryOpen) return;
+      event.preventDefault();
+      useEditorStore.getState().setMaximize(false);
+    }
+
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [maximize]);
 
   /**
    * Selecting a file records a path-backed File Reference. The source bytes
@@ -148,22 +212,21 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
     [notify],
   );
 
-  const save = useCallback(async () => {
-    setSaveState('saving');
-    try {
-      const saved = await saveWorkflow(WORKFLOW_DRAFT_ID, {
-        name: draft.name,
-        workflow: draft.workflow,
-        layout: draft.layout,
-      });
-      setDraft({ name: saved.name, workflow: saved.workflow, layout: saved.layout });
-      setSaveState('saved');
-      notify('Draft saved.');
-    } catch {
-      setSaveState('error');
-      notify('The Workflow draft could not be saved.');
-    }
-  }, [draft, notify]);
+  const changeSection = useCallback(
+    (section: WorkspaceSection) => {
+      if (section === 'node-library') {
+        setLibraryOpen(true);
+        return;
+      }
+      useEditorStore.getState().setMaximize(false);
+      setActiveSection(section);
+    },
+    [setLibraryOpen],
+  );
+
+  const saveDraft = useCallback(() => {
+    void saveNow({ notify: true });
+  }, [saveNow]);
 
   const explorerRail = useMemo(
     () => (
@@ -200,24 +263,30 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
   );
 
   return (
-    <div className="app-shell" data-testid="app-shell">
+    <div
+      className={`app-shell${maximize ? ' app-shell-maximized' : ''}`}
+      data-testid="app-shell"
+      data-maximized={maximize ? 'true' : 'false'}
+    >
       <GlobalToolbar
         project={project}
-        draftName={draft.name}
+        draftName={draftName}
         saveState={saveState}
-        onSave={() => void save()}
+        onSave={saveDraft}
         onRun={() => notify('Run creation is not available yet.')}
       />
 
       <div className="workspace-main">
-        <PrimaryNav
-          active={activeSection}
-          onChange={setActiveSection}
-          onOpenSettings={() => setSettingsOpen(true)}
-        />
+        {!maximize ? (
+          <PrimaryNav
+            active={activeSection}
+            onChange={changeSection}
+            onOpenSettings={() => setSettingsOpen(true)}
+          />
+        ) : null}
 
-        {explorerCollapsed ? explorerRail : null}
-        {!explorerCollapsed ? (
+        {!maximize && explorerCollapsed ? explorerRail : null}
+        {!maximize && !explorerCollapsed ? (
           <>
             <FileExplorer
               selectedPath={selectedFilePath}
@@ -236,9 +305,10 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
           <div className="editor-stack">
             {activeSection === 'workflows' ? (
               <WorkflowSurface
-                draftName={draft.name}
-                onNavigate={setActiveSection}
+                manifests={manifests}
                 onValidate={() => notify('Workflow validation is not available yet.')}
+                onRun={() => notify('Run creation is not available yet.')}
+                onNotify={notify}
               />
             ) : activeSection === 'terminal' ? (
               <TerminalSurface />
@@ -248,7 +318,7 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
                 selectedFilePath={selectedFilePath}
                 selectedReference={selectedReference}
                 fileReferences={fileReferences}
-                onNavigate={setActiveSection}
+                onNavigate={changeSection}
               />
             )}
           </div>
@@ -263,7 +333,12 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
               testId="agent-resizer"
               onResizeBy={resizeAgentBy}
             />
-            <AgentPanel width={agentWidth} onCollapse={toggleAgent} />
+            <AgentPanel
+              width={agentWidth}
+              onCollapse={toggleAgent}
+              manifests={manifests}
+              fileReferences={fileReferences}
+            />
           </>
         ) : null}
         {agentCollapsed ? agentRail : null}

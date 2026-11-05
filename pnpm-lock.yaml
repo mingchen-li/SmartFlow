@@ -44,6 +44,9 @@ importers:
       '@sflow/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@sflow/nodes':
+        specifier: workspace:*
+        version: link:../../packages/nodes
       fastify:
         specifier: ^5.12.8
         version: 5.12.8
@@ -63,6 +66,9 @@ importers:
       '@sflow/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@sflow/nodes':
+        specifier: workspace:*
+        version: link:../../packages/nodes
       '@xterm/addon-fit':
         specifier: ^0.11.0
         version: 0.11.0

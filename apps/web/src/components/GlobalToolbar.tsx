@@ -1,5 +1,5 @@
 import type { Project } from '@sflow/domain';
-import type { SaveState } from './Workspace';
+import type { SaveState } from '../store/editor';
 
 export interface GlobalToolbarProps {
   project: Project;
@@ -29,7 +29,11 @@ export function GlobalToolbar({
           : '';
 
   return (
-    <header className="global-toolbar" data-testid="global-toolbar">
+    <header
+      className="global-toolbar"
+      data-testid="global-toolbar"
+      data-save-state={saveState}
+    >
       <span className="brand" data-testid="brand">
         SFlow
       </span>
@@ -45,7 +49,12 @@ export function GlobalToolbar({
 
       <div className="toolbar-spacer" />
 
-      <span className="muted" role="status" aria-live="polite">
+      <span
+        className="muted"
+        role="status"
+        aria-live="polite"
+        data-testid="save-status"
+      >
         {saveLabel}
       </span>
 

@@ -7,6 +7,7 @@ import {
   AgentPatchSchema,
   ArtifactSchema,
   MetricSchema,
+  NodeManifestSchema,
   ResultViewIRSchema,
   RunEventSchema,
   RunSchema,
@@ -17,6 +18,7 @@ import {
   type Artifact,
   type FileReference,
   type Metric,
+  type NodeManifest,
   type Project,
   type ResultViewIR,
   type Run,
@@ -64,6 +66,25 @@ interface FileReferenceRow {
   name: string;
   size: number;
   registered_at: string;
+}
+
+interface InstalledNodeRow {
+  id: string;
+  version: string;
+  manifest_json: string;
+  path: string;
+  installed_at: string;
+}
+
+/**
+ * One Project-installed Node package. `path` is Project-relative
+ * (`.sflow/nodes/<manifestId>/<version>`) so the record survives a Project
+ * directory move; the Manifest is the validated scientific contract.
+ */
+export interface StoredInstalledNode {
+  manifest: NodeManifest;
+  path: string;
+  installedAt: string;
 }
 
 interface RunRow {
@@ -429,6 +450,70 @@ export class ProjectStore implements OrchestratorStore {
       size: row.size,
       registeredAt: row.registered_at,
     };
+  }
+
+  /**
+   * Installed custom Nodes are Project-scoped. The Manifest is stored as
+   * validated JSON beside the copied package location so the catalog can be
+   * rebuilt on Server start; the Manifest itself is never mutated in place.
+   */
+  listInstalledNodes(): StoredInstalledNode[] {
+    const rows = this.db
+      .prepare(
+        'SELECT id, version, manifest_json, path, installed_at FROM installed_nodes ORDER BY id ASC',
+      )
+      .all() as unknown as InstalledNodeRow[];
+
+    return rows.flatMap((row) => {
+      const installed = this.rowToInstalledNode(row);
+      return installed ? [installed] : [];
+    });
+  }
+
+  /** Installs or replaces the single installed version of one Manifest id. */
+  saveInstalledNode(input: {
+    manifest: NodeManifest;
+    path: string;
+    installedAt: string;
+  }): StoredInstalledNode {
+    const manifest = NodeManifestSchema.parse(input.manifest);
+    this.db
+      .prepare(
+        `INSERT INTO installed_nodes (id, version, manifest_json, path, installed_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           version = excluded.version,
+           manifest_json = excluded.manifest_json,
+           path = excluded.path,
+           installed_at = excluded.installed_at`,
+      )
+      .run(
+        manifest.id,
+        manifest.version,
+        JSON.stringify(manifest),
+        input.path,
+        input.installedAt,
+      );
+    return { manifest, path: input.path, installedAt: input.installedAt };
+  }
+
+  deleteInstalledNode(id: string): boolean {
+    const result = this.db.prepare('DELETE FROM installed_nodes WHERE id = ?').run(id);
+    return Number(result.changes) > 0;
+  }
+
+  private rowToInstalledNode(row: InstalledNodeRow): StoredInstalledNode | undefined {
+    try {
+      const parsed = NodeManifestSchema.safeParse(JSON.parse(row.manifest_json));
+      if (!parsed.success) return undefined;
+      return {
+        manifest: parsed.data,
+        path: row.path,
+        installedAt: row.installed_at,
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   /**

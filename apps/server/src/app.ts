@@ -18,6 +18,7 @@ import {
 import { registerAuthGuard, registerAuthRoutes } from './auth';
 import { registerAgentPatchRoutes } from './agent-patches';
 import { installErrorHandler } from './errors';
+import { ProjectNodeCatalog } from './node-catalog';
 import { registerNodeRoutes } from './nodes';
 import { registerPages } from './pages';
 import { registerRunRoutes } from './runs';
@@ -158,11 +159,19 @@ export async function createProjectServer(
   const store = new ProjectStore(projectRoot);
   const { generatedCredential } = store.initializeCredential(options.credential);
   const session = new SessionService(store.getSessionSecret());
-  const registry = withNodeImplementations(
+  const builtinRegistry = withNodeImplementations(
     options.registry ?? createBuiltinNodeRegistry(),
     options.nodeImplementations,
   );
-  const manifests = registry.list().map((implementation) => implementation.manifest);
+  // The catalog owns one live registry for the whole Server process. Installed
+  // packages are loaded from Project state before routes register, and every
+  // later install refreshes this same registry.
+  const catalog = new ProjectNodeCatalog({
+    projectRoot,
+    store,
+    builtinRegistry,
+  });
+  await catalog.initialize();
   const executorKind = resolveExecutorKind(options.executor);
   let executor: ComputeExecutor;
   if (executorKind === 'slurm') {
@@ -176,7 +185,7 @@ export async function createProjectServer(
     executor = new LocalExecutor({
       projectRoot,
       jobsDir: join(store.sflowDir, 'executor'),
-      registry,
+      registry: catalog.registry,
       executionDelayMs: options.executorDelayMs ?? executorDelayFromEnvironment(),
     });
   }
@@ -196,11 +205,11 @@ export async function createProjectServer(
 
   registerAuthGuard(app, session);
   registerAuthRoutes(app, store, session);
-  registerNodeRoutes(app, manifests);
+  registerNodeRoutes(app, catalog);
   registerWidgetRoutes(app);
   registerWorkspaceRoutes(app, store);
-  registerRunRoutes(app, store, orchestrator, manifests);
-  registerAgentPatchRoutes(app, store, manifests);
+  registerRunRoutes(app, store, orchestrator, catalog);
+  registerAgentPatchRoutes(app, store, catalog);
   registerTerminalRoute(app, store);
   registerPages(app, session, webDist);
 

@@ -21,8 +21,8 @@ import {
   type NodeManifest,
   type ValidationDiagnostic,
 } from '@sflow/domain';
-import { builtinManifests } from '@sflow/nodes';
 import { HttpError, parseOrThrow } from './errors';
+import type { NodeCatalogReader } from './node-catalog';
 import type { ProjectStore } from './store';
 
 /**
@@ -121,7 +121,7 @@ function requireWorkflowPatchScope(patch: Pick<AgentPatch, 'scope'>): void {
 export function registerAgentPatchRoutes(
   app: FastifyInstance,
   store: ProjectStore,
-  manifests: readonly NodeManifest[] = builtinManifests,
+  catalog: NodeCatalogReader,
 ): void {
   app.post('/api/workflows/:id/agent/patches', async (request, reply) => {
     const { id } = parseOrThrow(WorkflowParamsSchema, request.params);
@@ -144,7 +144,11 @@ export function registerAgentPatchRoutes(
       throw staleBaseError(proposal.baseRevision, draft.revision, 'baseRevision');
     }
 
-    const evaluation = evaluateWorkflowPatch(draft.workflow, proposal.operations, manifests);
+    const evaluation = evaluateWorkflowPatch(
+      draft.workflow,
+      proposal.operations,
+      catalog.listManifests(),
+    );
     const now = new Date().toISOString();
     const patch = store.saveAgentPatch({
       id: randomUUID(),
@@ -205,7 +209,11 @@ export function registerAgentPatchRoutes(
 
     // Apply re-validates against the current draft: a patch that once passed
     // must still pass before it can mutate persisted Workflow IR.
-    const evaluation = evaluateWorkflowPatch(draft.workflow, patch.operations, manifests);
+    const evaluation = evaluateWorkflowPatch(
+      draft.workflow,
+      patch.operations,
+      catalog.listManifests(),
+    );
     const now = new Date().toISOString();
     if (!evaluation.validation.valid || !evaluation.application) {
       const rejected = store.saveAgentPatch({
@@ -288,6 +296,7 @@ export function registerAgentPatchRoutes(
       );
     }
 
+    const revertManifests = catalog.listManifests();
     const parsed = WorkflowIRSchema.safeParse(revertedWorkflow);
     if (!parsed.success) {
       throw new HttpError(
@@ -295,7 +304,7 @@ export function registerAgentPatchRoutes(
         'PATCH_REVERT_FAILED',
         'Rolling back the patch would produce an invalid Workflow IR.',
         {
-          diagnostics: validateWorkflow(revertedWorkflow, manifests).diagnostics,
+          diagnostics: validateWorkflow(revertedWorkflow, revertManifests).diagnostics,
         },
       );
     }
@@ -303,7 +312,7 @@ export function registerAgentPatchRoutes(
     // Revert restores the exact prior execution state. Semantic diagnostics
     // are recorded for transparency but do not block restoring a draft that
     // existed before the patch was applied.
-    const validation = validateWorkflow(parsed.data, manifests, {
+    const validation = validateWorkflow(parsed.data, revertManifests, {
       requiredOutputs: BINDER_REQUIRED_OUTPUTS,
     });
     const saved = store.saveDraft(patch.workflowId, {

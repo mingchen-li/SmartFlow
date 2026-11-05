@@ -143,6 +143,7 @@ export const WorkflowParamsSchema = z.object({
 export type WorkflowParams = z.infer<typeof WorkflowParamsSchema>;
 
 export * from './workflow';
+export * from './node-package';
 export * from './workflow-validation';
 export * from './run';
 export * from './json-patch';

@@ -1994,6 +1994,118 @@ button {
   font-size: var(--font-size-2);
 }
 
+.node-library-header-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.node-library-install {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-6) var(--space-4);
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface-gray-25);
+}
+
+.node-library-install-label {
+  font-size: var(--font-size-1);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.node-library-install-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.node-library-install-row .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.node-library-install-hint {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+}
+
+.node-library-install-hint code {
+  font-size: 10px;
+}
+
+.node-library-install-error {
+  max-height: 120px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-destructive-ring);
+  border-radius: var(--radius-md);
+  background: var(--color-status-destructive-bg);
+  color: var(--color-semantic-destructive);
+  font-size: var(--font-size-1);
+  line-height: 1.45;
+}
+
+.node-library-install-error ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.node-library-install-error li {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.node-library-install-error code {
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.node-library-install-notice {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--space-2) var(--space-6);
+  border-top: 1px solid var(--color-status-success-bg);
+  background: var(--color-status-success-bg);
+  color: var(--color-semantic-success);
+  font-size: var(--font-size-1);
+}
+
+.node-library-card-badges {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.node-library-card-environment,
+.node-library-card-source {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--color-text-secondary);
+}
+
+.node-library-card-source {
+  opacity: 0.85;
+}
+
 /* Node Inspector */
 
 .node-inspector {

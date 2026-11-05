@@ -1,4 +1,5 @@
 import type {
+  InstalledNode,
   NodeManifest,
   ValidateWorkflowResponse,
 } from '@sflow/domain';
@@ -10,6 +11,8 @@ import { WorkflowValidationPanel } from './WorkflowValidationPanel';
 
 export interface WorkflowSurfaceProps {
   manifests: readonly NodeManifest[];
+  installedNodes: readonly InstalledNode[];
+  onCatalogChanged: () => void | Promise<void>;
   onValidate: () => void;
   onRun: () => void;
   onNotify: (message: string) => void;
@@ -28,6 +31,8 @@ export interface WorkflowSurfaceProps {
  */
 export function WorkflowSurface({
   manifests,
+  installedNodes,
+  onCatalogChanged,
   onValidate,
   onRun,
   onNotify,
@@ -131,7 +136,11 @@ export function WorkflowSurface({
         stale={validationStale}
       />
       <WorkflowCanvas manifests={manifests} onNotify={onNotify} runtime={runtime} />
-      <NodeLibrary manifests={manifests} />
+      <NodeLibrary
+        manifests={manifests}
+        installedNodes={installedNodes}
+        onCatalogChanged={onCatalogChanged}
+      />
     </>
   );
 }

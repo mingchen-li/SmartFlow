@@ -7,6 +7,7 @@ import type {
   FileListResponse,
   FileReference,
   FileReferenceListResponse,
+  InstallNodeResponse,
   LoginResponse,
   NodeCatalogResponse,
   Project,
@@ -20,6 +21,7 @@ import type {
   SaveWorkflowDraftRequest,
   SessionResponse,
   TaskLogsResponse,
+  UninstallNodeResponse,
   ValidateWorkflowResponse,
   WidgetCatalogResponse,
   WorkflowDraft,
@@ -82,6 +84,10 @@ export function apiPut<T>(path: string, body: unknown): Promise<T> {
   return request<T>(path, { method: 'PUT', body: JSON.stringify(body) });
 }
 
+export function apiDelete<T>(path: string): Promise<T> {
+  return request<T>(path, { method: 'DELETE' });
+}
+
 export function getSession(): Promise<SessionResponse> {
   return apiGet<SessionResponse>('/api/auth/session');
 }
@@ -124,6 +130,20 @@ export function listFileReferences(): Promise<FileReferenceListResponse> {
 
 export function listNodeManifests(): Promise<NodeCatalogResponse> {
   return apiGet<NodeCatalogResponse>('/api/nodes');
+}
+
+/**
+ * Installs a Project-relative Node package directory. The Server validates the
+ * Manifest and `index.mjs` before writing; a 422 carries path-addressed
+ * diagnostics in `details.diagnostics`.
+ */
+export function installNodePackage(path: string): Promise<InstallNodeResponse> {
+  return apiPost<InstallNodeResponse>('/api/nodes/install', { path });
+}
+
+/** Removes one Project-installed Node package; built-in Nodes are rejected. */
+export function uninstallNodePackage(id: string): Promise<UninstallNodeResponse> {
+  return apiDelete<UninstallNodeResponse>(`/api/nodes/${encodeURIComponent(id)}`);
 }
 
 export function getWorkflow(id: string): Promise<WorkflowDraft> {

@@ -11,6 +11,78 @@ mkdirSync(join(projectDir, 'designs', 'round-1'), { recursive: true });
 writeFileSync(join(projectDir, 'target.pdb'), 'HEADER TARGET\n');
 writeFileSync(join(projectDir, 'inputs', 'candidates.fasta'), '>candidate-1\nMKTAYIAKQR\n');
 writeFileSync(join(projectDir, 'designs', 'round-1', 'design-001.pdb'), 'HEADER DESIGN\n');
+// Seed a Project-relative custom Node package for the Node Library install flow.
+mkdirSync(join(projectDir, 'node-packages', 'echo-node'), { recursive: true });
+writeFileSync(
+  join(projectDir, 'node-packages', 'echo-node', 'manifest.json'),
+  JSON.stringify(
+    {
+      id: 'echo-node',
+      version: '1.0.0',
+      name: 'Echo Node',
+      description: 'Emit a deterministic greeting derived from its parameters.',
+      category: 'Custom',
+      type: 'transform',
+      inputs: [{ id: 'value', name: 'Value', direction: 'input', kind: 'data', dataType: 'any' }],
+      outputs: [
+        {
+          id: 'echoed',
+          name: 'Echoed value',
+          direction: 'output',
+          kind: 'data',
+          dataType: 'any',
+        },
+      ],
+      parameters: [
+        {
+          id: 'greeting',
+          name: 'Greeting',
+          type: 'string',
+          default: 'hello',
+          required: true,
+        },
+      ],
+      metrics: [
+        {
+          id: 'echoLength',
+          name: 'Echo length',
+          description: 'Characters in the echoed greeting.',
+          valueType: 'number',
+          direction: 'neutral',
+        },
+      ],
+      resources: { cpu: 1, memory: '1Gi', walltimeMinutes: 5 },
+      environment: {
+        kind: 'container',
+        image: 'ghcr.io/sflow/examples/echo-node:1.0.0',
+        command: ['run-echo'],
+        variables: { ECHO_MODE: 'deterministic' },
+      },
+      retry: { maxAttempts: 1, backoffSeconds: 0, retryOn: [] },
+    },
+    null,
+    2,
+  ),
+);
+writeFileSync(
+  join(projectDir, 'node-packages', 'echo-node', 'index.mjs'),
+  `export function run(input, params, context) {
+  const greeting = typeof params.greeting === 'string' ? params.greeting : 'hello';
+  context.log('echo greeting=' + greeting);
+  context.writeFile('echo.json', JSON.stringify({ greeting }) + '\\n');
+  return {
+    outputs: [
+      {
+        portId: 'echoed',
+        value: greeting,
+        artifacts: [{ name: 'echo.json', relativePath: 'echo.json', mediaType: 'application/json' }],
+      },
+    ],
+    metrics: { echoLength: greeting.length },
+  };
+}
+`,
+);
 // Enough root entries that the tree owns a scrollbar inside the fixed viewport.
 for (let index = 0; index < 30; index += 1) {
   writeFileSync(join(projectDir, `bulk-${String(index).padStart(3, '0')}.txt`), `entry ${index}\n`);

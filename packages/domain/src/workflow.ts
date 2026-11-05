@@ -287,11 +287,6 @@ export const EditorLayoutSchema = z.strictObject({
 });
 export type EditorLayout = z.infer<typeof EditorLayoutSchema>;
 
-export const NodeCatalogResponseSchema = z.object({
-  nodes: z.array(NodeManifestSchema),
-});
-export type NodeCatalogResponse = z.infer<typeof NodeCatalogResponseSchema>;
-
 export const NodeManifestParamsSchema = z.object({
   id: z.string().min(1).max(200),
 });

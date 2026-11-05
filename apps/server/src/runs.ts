@@ -17,16 +17,15 @@ import {
   type CancelRunResponse,
   type RerunTaskResponse,
   type ResultViewIR,
-  type NodeManifest,
   type ResultViewResponse,
   type Run,
   type RunDetailResponse,
   type RunEventsResponse,
   type TaskLogsResponse,
 } from '@sflow/domain';
-import { builtinManifests } from '@sflow/nodes';
 import { OrchestratorError, type Orchestrator } from '@sflow/orchestrator';
 import { HttpError, parseOrThrow } from './errors';
+import type { NodeCatalogReader } from './node-catalog';
 import type { ProjectStore } from './store';
 import { builtinWidgetDescriptors } from './widgets';
 
@@ -60,7 +59,7 @@ export function registerRunRoutes(
   app: FastifyInstance,
   store: ProjectStore,
   orchestrator: Orchestrator,
-  manifests: readonly NodeManifest[] = builtinManifests,
+  catalog: NodeCatalogReader,
 ): void {
   app.post('/api/workflows/:id/validate', async (request) => {
     const { id } = parseOrThrow(WorkflowParamsSchema, request.params);
@@ -69,7 +68,7 @@ export function registerRunRoutes(
       throw new HttpError(404, 'NOT_FOUND', 'Workflow draft not found.');
     }
 
-    return validateWorkflow(draft.workflow, manifests, {
+    return validateWorkflow(draft.workflow, catalog.listManifests(), {
       requiredOutputs: BINDER_REQUIRED_OUTPUTS,
     });
   });
@@ -83,6 +82,10 @@ export function registerRunRoutes(
       throw new HttpError(404, 'NOT_FOUND', 'Workflow draft not found.');
     }
 
+    // Validation and the snapshot read the same live catalog state. An install
+    // or uninstall between requests changes the next Run's contract, never an
+    // already-created snapshot.
+    const manifests = catalog.listManifests();
     const validation = validateWorkflow(draft.workflow, manifests, {
       requiredOutputs: BINDER_REQUIRED_OUTPUTS,
     });

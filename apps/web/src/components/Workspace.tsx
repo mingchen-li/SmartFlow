@@ -7,6 +7,7 @@ import {
   isActiveRunStatus,
   WorkflowIRSchema,
   type FileReference,
+  type InstalledNode,
   type NodeManifest,
   type Project,
   type Run,
@@ -69,6 +70,7 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
   const [selectedReference, setSelectedReference] = useState<FileReference | null>(null);
   const [fileReferences, setFileReferences] = useState<FileReference[]>([]);
   const [manifests, setManifests] = useState<NodeManifest[]>([]);
+  const [installedNodes, setInstalledNodes] = useState<InstalledNode[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [validation, setValidation] = useState<ValidateWorkflowResponse | null>(null);
@@ -203,10 +205,27 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
     };
   }, [hydrate, notify]);
 
+  // The catalog merges built-in and Project-installed Nodes. A successful
+  // install re-reads it so the Workflow editor, Agent, and validation use the
+  // same Server state without a page reload.
+  const refreshNodeCatalog = useCallback(async () => {
+    const response = await listNodeManifests();
+    setManifests([...response.nodes]);
+    setInstalledNodes([...response.installed]);
+  }, []);
+
   useEffect(() => {
+    let cancelled = false;
     listNodeManifests()
-      .then((response) => setManifests([...response.nodes]))
+      .then((response) => {
+        if (cancelled) return;
+        setManifests([...response.nodes]);
+        setInstalledNodes([...response.installed]);
+      })
       .catch(() => notify('Node Manifests could not be loaded.'));
+    return () => {
+      cancelled = true;
+    };
   }, [notify]);
 
   useEffect(() => {
@@ -609,6 +628,8 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
             {activeSection === 'workflows' ? (
               <WorkflowSurface
                 manifests={manifests}
+                installedNodes={installedNodes}
+                onCatalogChanged={refreshNodeCatalog}
                 onValidate={() => void validateDraft()}
                 onRun={() => void startRun()}
                 onNotify={notify}

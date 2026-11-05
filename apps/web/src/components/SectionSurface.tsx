@@ -1,4 +1,4 @@
-import type { FileReference } from '@sflow/domain';
+import type { FileReference, Run } from '@sflow/domain';
 import type { WorkspaceSection } from './PrimaryNav';
 
 export interface SectionSurfaceProps {
@@ -7,6 +7,8 @@ export interface SectionSurfaceProps {
   selectedReference: FileReference | null;
   fileReferences: FileReference[];
   onNavigate: (section: WorkspaceSection) => void;
+  runs?: readonly Run[];
+  onOpenResultView?: (runId: string) => void;
 }
 
 /**
@@ -19,6 +21,8 @@ export function SectionSurface({
   selectedReference,
   fileReferences,
   onNavigate,
+  runs = [],
+  onOpenResultView,
 }: SectionSurfaceProps) {
   return (
     <div className="editor-surface" data-testid={`section-${section}`}>
@@ -84,7 +88,31 @@ export function SectionSurface({
               Runs capture an immutable snapshot of the Workflow, parameters, File References, Node
               Manifests, and environment requirements used at start time.
             </p>
-            <p className="muted">No Runs yet.</p>
+            {runs.length === 0 ? (
+              <p className="muted">No Runs yet.</p>
+            ) : (
+              <ul className="runs-list" data-testid="runs-list">
+                {runs.map((run) => (
+                  <li key={run.id} data-testid={`run-${run.id}`}>
+                    <span className="run-list-id">Run {run.id}</span>
+                    <span className={`badge badge-${run.status === 'completed' ? 'success' : run.status === 'failed' ? 'warning' : run.status === 'queued' || run.status === 'running' ? 'info' : 'neutral'}`}>
+                      {run.status}
+                    </span>
+                    <span className="muted">
+                      {run.snapshot.workflow.nodes.length} Nodes · {run.createdAt}
+                    </span>
+                    <button
+                      type="button"
+                      className="button button-sm button-outline"
+                      data-testid={`open-run-result-view-${run.id}`}
+                      onClick={() => onOpenResultView?.(run.id)}
+                    >
+                      Inspect results
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
             <button
               type="button"
               className="button button-outline"

@@ -4,17 +4,22 @@ import {
   createEmptyWorkflow,
   EditorLayoutSchema,
   findManifest,
+  isActiveRunStatus,
   WorkflowIRSchema,
   type FileReference,
   type NodeManifest,
   type Project,
   type Run,
+  type RunDetailResponse,
+  type RunEvent,
   type ValidateWorkflowResponse,
   type ValidationDiagnostic,
 } from '@sflow/domain';
 import {
   ApiError,
   createRun,
+  getRun,
+  getRunEvents,
   getWorkflow,
   listFileReferences,
   listNodeManifests,
@@ -34,11 +39,13 @@ import { GlobalToolbar } from './GlobalToolbar';
 import { NodeInspector } from './NodeInspector';
 import { PrimaryNav, type WorkspaceSection } from './PrimaryNav';
 import { ResizeHandle } from './ResizeHandle';
+import { ResultViewSurface } from './ResultViewSurface';
 import { RunMonitor } from './RunMonitor';
 import { SectionSurface } from './SectionSurface';
 import { SettingsDialog } from './SettingsDialog';
 import { TerminalSurface } from './TerminalSurface';
 import { WorkflowSurface } from './WorkflowSurface';
+import type { CanvasRuntimeState } from './WorkflowNodeCard';
 
 export const WORKFLOW_DRAFT_ID = 'binder-design';
 
@@ -66,6 +73,10 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
   const [validating, setValidating] = useState(false);
   const [startingRun, setStartingRun] = useState(false);
   const [latestRun, setLatestRun] = useState<Run | null>(null);
+  const [runs, setRuns] = useState<Run[]>([]);
+  const [runDetail, setRunDetail] = useState<RunDetailResponse | null>(null);
+  const [runEvents, setRunEvents] = useState<RunEvent[]>([]);
+  const [resultRunId, setResultRunId] = useState<string | null>(null);
   const selectedPathRef = useRef<string | null>(null);
   const wasMaximizedRef = useRef(false);
 
@@ -213,7 +224,9 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
     let cancelled = false;
     listRuns()
       .then((response) => {
-        if (!cancelled) setLatestRun(response.runs[0] ?? null);
+        if (cancelled) return;
+        setRuns(response.runs);
+        setLatestRun(response.runs[0] ?? null);
       })
       .catch(() => {
         if (!cancelled) notify('Run history could not be loaded.');
@@ -222,6 +235,93 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
       cancelled = true;
     };
   }, [notify]);
+
+  // While a Run is active, poll Run detail and append-only events so every
+  // monitor tab and the canvas overlay observe live state. Polling only reads
+  // persisted Run data; it never writes editorial or draft state.
+  const runId = latestRun?.id ?? null;
+  useEffect(() => {
+    setRunDetail(null);
+    setRunEvents([]);
+    if (!runId) return;
+
+    let cancelled = false;
+    let timer: number | undefined;
+    let after = 0;
+
+    async function poll(): Promise<void> {
+      try {
+        const [detail, eventsResponse] = await Promise.all([
+          getRun(runId!),
+          getRunEvents(runId!, after),
+        ]);
+        if (cancelled) return;
+
+        setRunDetail(detail);
+        setLatestRun((current) => (current?.id === runId ? detail.run : current));
+        setRuns((current) =>
+          current.map((entry) => (entry.id === runId ? detail.run : entry)),
+        );
+
+        if (eventsResponse.events.length > 0) {
+          after = eventsResponse.events[eventsResponse.events.length - 1]!.id;
+          setRunEvents((current) => {
+            const seen = new Set(current.map((event) => event.id));
+            return [...current, ...eventsResponse.events.filter((event) => !seen.has(event.id))];
+          });
+        }
+
+        if (isActiveRunStatus(detail.run.status)) {
+          timer = window.setTimeout(() => void poll(), 500);
+        }
+      } catch {
+        if (!cancelled) timer = window.setTimeout(() => void poll(), 1_000);
+      }
+    }
+
+    // A freshly created Run is reported as queued by the create response. Keep
+    // that observed state visible for a moment before the first detail poll so
+    // an immediately finishing Run does not erase the transition; later polls
+    // are live.
+    if (latestRun && isActiveRunStatus(latestRun.status)) {
+      timer = window.setTimeout(() => void poll(), 800);
+    } else {
+      void poll();
+    }
+
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+    // `latestRun` is read only to decide the initial hold; run identity drives
+    // the effect so polling Run detail updates cannot restart it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId]);
+
+  // Read-only projection of active Run state onto Nodes that belong to the
+  // Run's snapshot. Undefined once the Run reaches a terminal state.
+  const canvasRuntime = useMemo<CanvasRuntimeState | null>(() => {
+    if (!latestRun || !isActiveRunStatus(latestRun.status)) return null;
+    const tasksByNode = new Map(
+      (runDetail?.tasks ?? []).map((task) => [task.nodeId, task]),
+    );
+    return {
+      runId: latestRun.id,
+      runStatus: latestRun.status,
+      tasks: latestRun.snapshot.nodes.map((node) => {
+        const task = tasksByNode.get(node.nodeId);
+        return {
+          nodeId: node.nodeId,
+          state: task?.state ?? 'queued',
+          attempt: task?.attempt ?? 1,
+        };
+      }),
+    };
+  }, [latestRun, runDetail]);
+
+  const openResultView = useCallback((id: string) => {
+    setResultRunId(id);
+  }, []);
 
   // App-level maximize, not the browser Fullscreen API. Escape exits and the
   // toolbar toggle regains focus.
@@ -344,6 +444,7 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
 
       const { run } = await createRun(WORKFLOW_DRAFT_ID);
       setLatestRun(run);
+      setRuns((current) => [run, ...current.filter((entry) => entry.id !== run.id)]);
       notify(`Run ${run.id} queued.`);
     } catch (error) {
       if (
@@ -458,6 +559,7 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
                 validationStale={validation !== null && !validationCurrent}
                 canRun={canRun}
                 runPending={startingRun}
+                runtime={canvasRuntime}
               />
             ) : activeSection === 'terminal' ? (
               <TerminalSurface />
@@ -468,10 +570,17 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
                 selectedReference={selectedReference}
                 fileReferences={fileReferences}
                 onNavigate={changeSection}
+                runs={runs}
+                onOpenResultView={openResultView}
               />
             )}
           </div>
-          <RunMonitor run={latestRun} />
+          <RunMonitor
+            run={latestRun}
+            detail={runDetail}
+            events={runEvents}
+            onOpenResultView={openResultView}
+          />
         </main>
 
         {!maximize && !agentCollapsed ? (
@@ -531,6 +640,14 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
           project={project}
           onClose={() => setSettingsOpen(false)}
           onSignedOut={onSignedOut}
+        />
+      ) : null}
+
+      {resultRunId ? (
+        <ResultViewSurface
+          key={resultRunId}
+          runId={resultRunId}
+          onClose={() => setResultRunId(null)}
         />
       ) : null}
 

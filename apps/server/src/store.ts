@@ -7,6 +7,7 @@ import {
   AgentPatchSchema,
   ArtifactSchema,
   MetricSchema,
+  ResultViewIRSchema,
   RunEventSchema,
   RunSchema,
   RunSnapshotSchema,
@@ -17,6 +18,7 @@ import {
   type FileReference,
   type Metric,
   type Project,
+  type ResultViewIR,
   type Run,
   type RunEvent,
   type RunSnapshot,
@@ -828,6 +830,54 @@ export class ProjectStore implements OrchestratorStore {
       const artifact = this.rowToArtifact(row);
       return artifact ? [artifact] : [];
     });
+  }
+
+  /**
+   * Result View IR is the durable description of a Run's analysis page. It is
+   * stored as validated JSON so the page survives restarts without depending
+   * on any frontend bundle.
+   */
+  saveResultView(resultView: ResultViewIR): ResultViewIR {
+    const parsed = ResultViewIRSchema.parse(resultView);
+    requireNamespaceId(parsed.runId, 'Run');
+    const updatedAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO result_views (run_id, ir_json, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(run_id) DO UPDATE SET
+           ir_json = excluded.ir_json,
+           updated_at = excluded.updated_at`,
+      )
+      .run(parsed.runId, JSON.stringify(parsed), updatedAt);
+    return parsed;
+  }
+
+  getResultView(runId: string): ResultViewIR | undefined {
+    requireNamespaceId(runId, 'Run');
+    const row = this.db
+      .prepare('SELECT ir_json FROM result_views WHERE run_id = ?')
+      .get(runId) as unknown as { ir_json: string } | undefined;
+    if (!row) return undefined;
+
+    try {
+      const parsed = ResultViewIRSchema.safeParse(JSON.parse(row.ir_json));
+      return parsed.success ? parsed.data : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  getArtifact(runId: string, artifactId: string): Artifact | undefined {
+    requireNamespaceId(runId, 'Run');
+    const row = this.db
+      .prepare(
+        `SELECT id, run_id, task_id, node_id, name, media_type, path, sha256, size,
+                schema_json, provenance_json, created_at
+         FROM artifacts WHERE run_id = ? AND id = ?`,
+      )
+      .get(runId, artifactId) as unknown as ArtifactRow | undefined;
+    return row ? this.rowToArtifact(row) : undefined;
   }
 
   listMetrics(runId: string): Metric[] {

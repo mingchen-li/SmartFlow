@@ -10,12 +10,16 @@ import type {
   LoginResponse,
   NodeCatalogResponse,
   Project,
+  ResultViewResponse,
   RotateCredentialResponse,
   RunDetailResponse,
+  RunEventsResponse,
   RunListResponse,
   SaveWorkflowDraftRequest,
   SessionResponse,
+  TaskLogsResponse,
   ValidateWorkflowResponse,
+  WidgetCatalogResponse,
   WorkflowDraft,
 } from '@sflow/domain';
 
@@ -156,6 +160,40 @@ export function getRun(id: string): Promise<RunDetailResponse> {
 
 export function listRuns(): Promise<RunListResponse> {
   return apiGet<RunListResponse>('/api/runs');
+}
+
+/** Append-only Run events after the last observed event id. */
+export function getRunEvents(id: string, after = 0): Promise<RunEventsResponse> {
+  const query = after > 0 ? `?after=${after}` : '';
+  return apiGet<RunEventsResponse>(
+    `/api/runs/${encodeURIComponent(id)}/events${query}`,
+  );
+}
+
+/** Line-oriented logs for one Task attempt. */
+export function getTaskLogs(runId: string, taskId: string): Promise<TaskLogsResponse> {
+  return apiGet<TaskLogsResponse>(
+    `/api/runs/${encodeURIComponent(runId)}/tasks/${encodeURIComponent(taskId)}/logs`,
+  );
+}
+
+/** Durable Result View IR, resolved data, and compatibility report. */
+export function getResultView(runId: string): Promise<ResultViewResponse> {
+  return apiGet<ResultViewResponse>(
+    `/api/runs/${encodeURIComponent(runId)}/result-view`,
+  );
+}
+
+/** Registered Result View Widget descriptors (data only, no render code). */
+export function listWidgets(): Promise<WidgetCatalogResponse> {
+  return apiGet<WidgetCatalogResponse>('/api/widgets');
+}
+
+/** Authenticated, immutable Artifact bytes with an attachment filename. */
+export function artifactDownloadUrl(runId: string, artifactId: string): string {
+  return `/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(
+    artifactId,
+  )}/download`;
 }
 
 /**

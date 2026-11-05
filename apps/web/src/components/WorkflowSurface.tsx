@@ -5,6 +5,7 @@ import type {
 import { useEditorStore } from '../store/editor';
 import { NodeLibrary } from './NodeLibrary';
 import { WorkflowCanvas } from './WorkflowCanvas';
+import type { CanvasRuntimeState } from './WorkflowNodeCard';
 import { WorkflowValidationPanel } from './WorkflowValidationPanel';
 
 export interface WorkflowSurfaceProps {
@@ -17,6 +18,7 @@ export interface WorkflowSurfaceProps {
   validationStale: boolean;
   canRun: boolean;
   runPending: boolean;
+  runtime?: CanvasRuntimeState | null;
 }
 
 /**
@@ -34,6 +36,7 @@ export function WorkflowSurface({
   validationStale,
   canRun,
   runPending,
+  runtime = null,
 }: WorkflowSurfaceProps) {
   const draftName = useEditorStore((state) => state.draftName);
   const saveState = useEditorStore((state) => state.saveState);
@@ -127,7 +130,7 @@ export function WorkflowSurface({
         validating={validating}
         stale={validationStale}
       />
-      <WorkflowCanvas manifests={manifests} onNotify={onNotify} />
+      <WorkflowCanvas manifests={manifests} onNotify={onNotify} runtime={runtime} />
       <NodeLibrary manifests={manifests} />
     </>
   );

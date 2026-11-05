@@ -85,6 +85,30 @@ export const FileListQuerySchema = z.object({
 });
 export type FileListQuery = z.infer<typeof FileListQuerySchema>;
 
+/**
+ * A path-backed Project input. SFlow records where the user's file lives; it
+ * deliberately carries no content digest because the bytes stay in the Project
+ * filesystem and are never copied into managed state (ADR-0008).
+ */
+export const FileReferenceSchema = z.object({
+  id: z.string().min(1),
+  path: z.string().min(1),
+  name: z.string().min(1),
+  size: z.number().int().nonnegative(),
+  registeredAt: z.string().min(1),
+});
+export type FileReference = z.infer<typeof FileReferenceSchema>;
+
+export const RegisterFileReferenceRequestSchema = z.object({
+  path: z.string().min(1).max(4096),
+});
+export type RegisterFileReferenceRequest = z.infer<typeof RegisterFileReferenceRequestSchema>;
+
+export const FileReferenceListResponseSchema = z.object({
+  references: z.array(FileReferenceSchema),
+});
+export type FileReferenceListResponse = z.infer<typeof FileReferenceListResponseSchema>;
+
 export const JsonObjectSchema = z.record(z.string(), z.unknown());
 export type JsonObject = z.infer<typeof JsonObjectSchema>;
 

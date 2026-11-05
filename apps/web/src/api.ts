@@ -1,6 +1,8 @@
 import type {
   ErrorResponse,
   FileListResponse,
+  FileReference,
+  FileReferenceListResponse,
   LoginResponse,
   Project,
   RotateCredentialResponse,
@@ -92,6 +94,15 @@ export function getProject(): Promise<Project> {
 export function listFiles(path = ''): Promise<FileListResponse> {
   const query = path ? `?path=${encodeURIComponent(path)}` : '';
   return apiGet<FileListResponse>(`/api/files${query}`);
+}
+
+/** Records a Project file by path; SFlow never copies or hashes its bytes. */
+export function registerFileReference(path: string): Promise<FileReference> {
+  return apiPost<FileReference>('/api/files', { path });
+}
+
+export function listFileReferences(): Promise<FileReferenceListResponse> {
+  return apiGet<FileReferenceListResponse>('/api/files/references');
 }
 
 export function getWorkflow(id: string): Promise<WorkflowDraft> {

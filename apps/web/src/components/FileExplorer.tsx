@@ -11,22 +11,39 @@ export interface FileExplorerProps {
 
 type ExplorerStatus = 'loading' | 'ready' | 'error';
 
-/** Read-only Project filesystem browser. `.sflow/` is never listed. */
+interface DirectoryState {
+  entries: FileEntry[];
+  status: ExplorerStatus;
+}
+
+/**
+ * Expandable, read-only Project filesystem tree. Directories open in place
+ * instead of navigating, selection is owned by the workspace, and the tree
+ * owns its vertical scroll so the Workflow editor never moves. `.sflow/` is
+ * never listed.
+ */
 export function FileExplorer({ selectedPath, onSelect, onCollapse }: FileExplorerProps) {
   const width = useLayoutStore((state) => state.explorerWidth);
-  const [path, setPath] = useState('');
-  const [entries, setEntries] = useState<FileEntry[]>([]);
-  const [status, setStatus] = useState<ExplorerStatus>('loading');
+  const [directories, setDirectories] = useState<Record<string, DirectoryState>>({});
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
 
-  const load = useCallback(async (nextPath: string) => {
-    setStatus('loading');
+  const load = useCallback(async (path: string) => {
+    setDirectories((current) => ({
+      ...current,
+      [path]: { entries: current[path]?.entries ?? [], status: 'loading' },
+    }));
+
     try {
-      const response = await listFiles(nextPath);
-      setEntries(response.entries);
-      setPath(response.path);
-      setStatus('ready');
+      const response = await listFiles(path);
+      setDirectories((current) => ({
+        ...current,
+        [path]: { entries: response.entries, status: 'ready' },
+      }));
     } catch {
-      setStatus('error');
+      setDirectories((current) => ({
+        ...current,
+        [path]: { entries: current[path]?.entries ?? [], status: 'error' },
+      }));
     }
   }, []);
 
@@ -34,14 +51,79 @@ export function FileExplorer({ selectedPath, onSelect, onCollapse }: FileExplore
     void load('');
   }, [load]);
 
-  function openDirectory(entry: FileEntry): void {
-    void load(entry.path);
+  function toggleDirectory(path: string): void {
+    if (expanded.has(path)) {
+      setExpanded((current) => {
+        const next = new Set(current);
+        next.delete(path);
+        return next;
+      });
+      return;
+    }
+
+    setExpanded((current) => new Set(current).add(path));
+    if (directories[path]?.status !== 'ready' && directories[path]?.status !== 'loading') {
+      void load(path);
+    }
   }
 
-  function goUp(): void {
-    const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-    void load(parent);
+  function refresh(): void {
+    void load('');
+    for (const path of expanded) void load(path);
   }
+
+  function renderEntries(parentPath: string, depth: number) {
+    const state = directories[parentPath];
+    if (!state) return null;
+
+    if (state.status === 'loading' && state.entries.length === 0) {
+      return <li className="empty-state">Loading files…</li>;
+    }
+
+    if (state.status === 'error') {
+      return (
+        <li className="error-text" role="alert">
+          The files in this directory could not be listed.
+        </li>
+      );
+    }
+
+    if (state.entries.length === 0) {
+      return <li className="empty-state">This directory is empty.</li>;
+    }
+
+    return state.entries.map((entry) => {
+      const isDirectory = entry.type === 'directory';
+      const isExpanded = isDirectory && expanded.has(entry.path);
+
+      return (
+        <li key={entry.path}>
+          <button
+            type="button"
+            className="file-entry"
+            style={{ paddingLeft: `${8 + depth * 14}px` }}
+            data-testid={`file-entry-${entry.path}`}
+            aria-expanded={isDirectory ? isExpanded : undefined}
+            aria-pressed={isDirectory ? undefined : selectedPath === entry.path}
+            onClick={() => (isDirectory ? toggleDirectory(entry.path) : onSelect(entry.path))}
+          >
+            <span className="file-kind" aria-hidden="true">
+              {isDirectory ? (isExpanded ? '▾' : '▸') : 'FILE'}
+            </span>
+            <span className="file-name">{entry.name}</span>
+          </button>
+
+          {isDirectory && isExpanded ? (
+            <ul className="file-tree file-tree-children">
+              {renderEntries(entry.path, depth + 1)}
+            </ul>
+          ) : null}
+        </li>
+      );
+    });
+  }
+
+  const root = directories[''];
 
   return (
     <section
@@ -57,7 +139,7 @@ export function FileExplorer({ selectedPath, onSelect, onCollapse }: FileExplore
             type="button"
             className="button button-ghost button-icon"
             aria-label="Refresh files"
-            onClick={() => void load(path)}
+            onClick={refresh}
           >
             ↻
           </button>
@@ -72,49 +154,30 @@ export function FileExplorer({ selectedPath, onSelect, onCollapse }: FileExplore
         </span>
       </header>
 
-      <div className="panel-body">
-        {path ? (
-          <div className="explorer-path">
-            <button type="button" className="button button-ghost button-sm" onClick={goUp}>
-              ↑ Up
-            </button>
-            <span className="muted">{path}/</span>
-          </div>
-        ) : (
-          <p className="empty-state">Project root</p>
-        )}
+      <div className="panel-body explorer-body">
+        <div className="explorer-tree-scroll" data-testid="explorer-tree-scroll">
+          {root === undefined || (root.status === 'loading' && root.entries.length === 0) ? (
+            <p className="empty-state">Loading files…</p>
+          ) : root.status === 'error' ? (
+            <p className="error-text" role="alert">
+              The Project files could not be listed.
+            </p>
+          ) : root.entries.length === 0 ? (
+            <p className="empty-state">This Project directory is empty.</p>
+          ) : (
+            <ul className="file-tree">{renderEntries('', 0)}</ul>
+          )}
+        </div>
 
-        {status === 'loading' ? <p className="empty-state">Loading files…</p> : null}
-        {status === 'error' ? (
-          <p className="error-text" role="alert">
-            The Project files could not be listed.
-          </p>
-        ) : null}
-        {status === 'ready' && entries.length === 0 ? (
-          <p className="empty-state">This directory is empty.</p>
-        ) : null}
-
-        {status === 'ready' && entries.length > 0 ? (
-          <ul className="file-tree">
-            {entries.map((entry) => (
-              <li key={entry.path}>
-                <button
-                  type="button"
-                  className="file-entry"
-                  aria-pressed={entry.type === 'file' ? selectedPath === entry.path : undefined}
-                  onClick={() =>
-                    entry.type === 'directory' ? openDirectory(entry) : onSelect(entry.path)
-                  }
-                >
-                  <span className="file-kind">
-                    {entry.type === 'directory' ? 'DIR' : 'FILE'}
-                  </span>
-                  <span>{entry.name}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
+        <div className="explorer-selection">
+          <span className="explorer-selection-label">Selected file</span>
+          <span className="explorer-selection-path" data-testid="explorer-selected-path">
+            {selectedPath ?? 'None'}
+          </span>
+          {selectedPath ? (
+            <span className="explorer-selection-note">Path-only File Reference</span>
+          ) : null}
+        </div>
       </div>
     </section>
   );

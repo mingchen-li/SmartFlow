@@ -854,6 +854,19 @@ button {
 
 /* File tree */
 
+.explorer-body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: var(--space-2);
+}
+
+.explorer-tree-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
 .file-tree {
   list-style: none;
   margin: 0;
@@ -861,11 +874,17 @@ button {
   font-size: var(--font-size-2);
 }
 
+.file-tree-children {
+  margin: 0;
+  padding: 0;
+}
+
 .file-entry {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
+  min-width: 0;
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
@@ -887,20 +906,91 @@ button {
   color: var(--color-brand-primary);
 }
 
-.explorer-path {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
+.file-name {
+  flex: 1 1 auto;
   min-width: 0;
-  margin-bottom: var(--space-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .file-kind {
-  min-width: 2.75rem;
+  flex: 0 0 auto;
+  min-width: 2.6rem;
   color: var(--color-text-secondary);
   font-size: var(--font-size-1);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+.explorer-selection {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--color-divider);
+}
+
+.explorer-selection-label {
+  font-size: var(--font-size-1);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.explorer-selection-path {
+  overflow-wrap: anywhere;
+}
+
+.explorer-selection-note {
+  font-size: var(--font-size-1);
+  color: var(--color-text-secondary);
+}
+
+/* File References */
+
+.reference-details {
+  max-width: 100%;
+  margin: var(--space-4) 0;
+  padding: var(--space-4);
+  text-align: left;
+  background: var(--color-surface-gray-25);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.reference-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-2) var(--space-4);
+  margin: 0 0 var(--space-3);
+}
+
+.reference-grid dt {
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.reference-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.reference-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.reference-list code {
+  overflow-wrap: anywhere;
 }
 
 .empty-state {

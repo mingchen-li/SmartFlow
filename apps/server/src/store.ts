@@ -4,6 +4,7 @@ import { basename, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   WorkflowDraftSchema,
+  type FileReference,
   type Project,
   type SaveWorkflowDraftRequest,
   type WorkflowDraft,
@@ -21,7 +22,28 @@ interface DraftRow {
   updated_at: string;
 }
 
+interface FileReferenceRow {
+  id: string;
+  path: string;
+  name: string;
+  size: number;
+  registered_at: string;
+}
+
 const SCRYPT_KEY_LENGTH = 64;
+const NAMESPACE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+
+/**
+ * Run and Task ids become directory names under `.sflow/runs`, so they must be
+ * a single safe path segment. SFlow generates them with `crypto.randomUUID()`;
+ * this guard also protects persisted or externally supplied ids.
+ */
+function requireNamespaceId(value: string, label: string): string {
+  if (!NAMESPACE_ID_PATTERN.test(value)) {
+    throw new Error(`Invalid ${label} identifier for a Project namespace.`);
+  }
+  return value;
+}
 
 /**
  * Project-scoped persistence. The Project root is the user's directory; SFlow
@@ -179,6 +201,98 @@ export class ProjectStore {
     };
   }
 
+  /**
+   * Records a Project file by location only. The caller supplies filesystem
+   * metadata from `stat`; SFlow never reads or hashes the file bytes here.
+   * Registration is idempotent per path so reselecting a file does not create
+   * duplicate references.
+   */
+  registerFileReference(input: { path: string; name: string; size: number }): FileReference {
+    const existing = this.findFileReferenceByPath(input.path);
+    if (existing) return existing;
+
+    const reference: FileReference = {
+      id: randomUUID(),
+      path: input.path,
+      name: input.name,
+      size: input.size,
+      registeredAt: new Date().toISOString(),
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO file_references (id, path, name, size, registered_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(reference.id, reference.path, reference.name, reference.size, reference.registeredAt);
+
+    return reference;
+  }
+
+  listFileReferences(): FileReference[] {
+    const rows = this.db
+      .prepare('SELECT id, path, name, size, registered_at FROM file_references ORDER BY path')
+      .all() as unknown as FileReferenceRow[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      path: row.path,
+      name: row.name,
+      size: row.size,
+      registeredAt: row.registered_at,
+    }));
+  }
+
+  findFileReferenceByPath(path: string): FileReference | undefined {
+    const row = this.db
+      .prepare('SELECT id, path, name, size, registered_at FROM file_references WHERE path = ?')
+      .get(path) as unknown as FileReferenceRow | undefined;
+
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      path: row.path,
+      name: row.name,
+      size: row.size,
+      registeredAt: row.registered_at,
+    };
+  }
+
+  /**
+   * Project state is namespaced so two files with the same name never
+   * overwrite one another:
+   *
+   * - Project: `<project>/...` (the user-owned filesystem)
+   * - Run:     `<project>/.sflow/runs/<runId>/`
+   * - Task:    `<project>/.sflow/runs/<runId>/tasks/<taskId>/`
+   *
+   * The path helpers are pure; the ensure helpers create the directories for
+   * the Orchestrator and Compute Executor.
+   */
+  runNamespace(runId: string): string {
+    return join(this.sflowDir, 'runs', requireNamespaceId(runId, 'Run'));
+  }
+
+  taskNamespace(runId: string, taskId: string): string {
+    return join(
+      this.runNamespace(runId),
+      'tasks',
+      requireNamespaceId(taskId, 'Task'),
+    );
+  }
+
+  ensureRunNamespace(runId: string): string {
+    const directory = this.runNamespace(runId);
+    mkdirSync(directory, { recursive: true });
+    return directory;
+  }
+
+  ensureTaskNamespace(runId: string, taskId: string): string {
+    const directory = this.taskNamespace(runId, taskId);
+    mkdirSync(directory, { recursive: true });
+    return directory;
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -223,6 +337,14 @@ export class ProjectStore {
         draft_json TEXT NOT NULL,
         layout_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS file_references (
+        id TEXT PRIMARY KEY,
+        path TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        registered_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS runs (

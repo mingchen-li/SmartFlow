@@ -24,6 +24,7 @@ export interface HydrateEditorInput {
   name: string;
   workflow: WorkflowIR;
   layout: EditorLayout;
+  revision?: number;
 }
 
 export interface EditorState {
@@ -35,12 +36,20 @@ export interface EditorState {
   revision: number;
   /** Last revision confirmed by the Server; drives debounced autosave. */
   savedRevision: number;
+  /**
+   * Persisted Workflow IR revision. It advances only when the Workflow changes
+   * and is the base an Agent patch must match; layout-only saves leave it
+   * stable.
+   */
+  draftRevision: number;
   saveState: SaveState;
   /** Runtime UI state, deliberately not part of the draft. */
   libraryOpen: boolean;
   maximize: boolean;
   hydrate: (input: HydrateEditorInput) => void;
-  markSaved: (revision: number) => void;
+  markSaved: (revision: number, draftRevision?: number) => void;
+  /** Synchronizes a Server-applied Workflow without touching layout state. */
+  applyAgentPatchWorkflow: (workflow: WorkflowIR, draftRevision: number) => void;
   setSaveState: (state: SaveState) => void;
   setLibraryOpen: (open: boolean) => void;
   setMaximize: (maximize: boolean) => void;
@@ -87,11 +96,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   hydrated: false,
   revision: 0,
   savedRevision: 0,
+  draftRevision: 0,
   saveState: 'idle',
   libraryOpen: false,
   maximize: false,
 
-  hydrate: ({ name, workflow, layout }) =>
+  hydrate: ({ name, workflow, layout, revision = 0 }) =>
     set({
       draftName: name,
       workflow,
@@ -99,14 +109,27 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       hydrated: true,
       revision: 0,
       savedRevision: 0,
+      draftRevision: revision,
       saveState: 'idle',
       libraryOpen: false,
       maximize: false,
     }),
 
-  markSaved: (revision) =>
+  markSaved: (revision, draftRevision) =>
     set((state) => ({
       savedRevision: revision,
+      draftRevision: draftRevision ?? state.draftRevision,
+      saveState: 'saved',
+    })),
+
+  applyAgentPatchWorkflow: (workflow, draftRevision) =>
+    set((state) => ({
+      workflow,
+      draftRevision,
+      // The Server already persisted this Workflow. Treat the local document
+      // as saved so autosave cannot immediately send it back or clobber the
+      // post-patch revision.
+      savedRevision: state.revision,
       saveState: 'saved',
     })),
 

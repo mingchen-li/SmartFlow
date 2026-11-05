@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { Run } from '@sflow/domain';
 
 type MonitorTab = 'logs' | 'jobs' | 'outputs';
 
@@ -8,19 +9,30 @@ const MONITOR_TABS: Array<{ id: MonitorTab; label: string; empty: string }> = [
   { id: 'outputs', label: 'Outputs', empty: 'No output files yet.' },
 ];
 
+export interface RunMonitorProps {
+  /** Most recent Run, or null before the first Run starts. */
+  run?: Run | null;
+}
+
 /**
  * Run monitor stays visible across workspace sections. Cards use an auto-fit
  * grid so they stack or scroll at narrow widths instead of disappearing.
  */
-export function RunMonitor() {
+export function RunMonitor({ run = null }: RunMonitorProps) {
   const [tab, setTab] = useState<MonitorTab>('logs');
   const activeTab = MONITOR_TABS.find((item) => item.id === tab) ?? MONITOR_TABS[0];
+  const runStatus = run?.status ?? 'Idle';
 
   return (
     <section className="run-monitor" aria-label="Run monitor" data-testid="run-monitor">
       <header className="run-monitor-header">
         <span>Run monitor</span>
-        <span className="badge badge-neutral">Idle</span>
+        <span
+          className={`badge ${run ? 'badge-info' : 'badge-neutral'}`}
+          data-testid="monitor-run-status"
+        >
+          {runStatus}
+        </span>
       </header>
 
       <div className="run-monitor-tabs" role="tablist" aria-label="Run monitor views">
@@ -44,10 +56,16 @@ export function RunMonitor() {
           <article className="card">
             <div className="card-header">
               <span className="card-title">Run state</span>
-              <span className="badge badge-neutral">Idle</span>
+              <span className={`badge ${run ? 'badge-info' : 'badge-neutral'}`}>
+                {runStatus}
+              </span>
             </div>
-            <div className="card-value">Idle</div>
-            <div className="muted">No active Run.</div>
+            <div className="card-value" data-testid="monitor-run-state">
+              {runStatus}
+            </div>
+            <div className="muted" data-testid="monitor-run-id">
+              {run ? `Run ${run.id}` : 'No active Run.'}
+            </div>
           </article>
           <article className="card">
             <div className="card-header">

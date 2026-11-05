@@ -243,13 +243,14 @@ test('connects valid data and control edges and persists layout without pollutin
     await page.getByTestId('workflow-canvas').getAttribute('data-viewport-y'),
   );
 
-  // Validate and Run are visible placeholders for ticket #6.
+  // Validate runs the shared Workflow validation; this incomplete draft fails,
+  // so both Run controls stay disabled and diagnostics are shown.
   await page.getByTestId('workflow-toolbar').getByTestId('validate-workflow').click();
-  await expect(page.getByTestId('toast')).toHaveText(
-    'Workflow validation is not available yet.',
-  );
-  await page.getByTestId('workflow-toolbar').getByTestId('run-workflow').click();
-  await expect(page.getByTestId('toast')).toHaveText('Run creation is not available yet.');
+  await expect(page.getByTestId('validation-panel')).toBeVisible();
+  await expect(page.getByTestId('validation-summary')).toContainText('validation error');
+  await expect(page.getByTestId('validation-diagnostic').first()).toBeVisible();
+  await expect(page.getByTestId('run-workflow')).toBeDisabled();
+  await expect(page.getByTestId('global-run')).toBeDisabled();
 
   await pollDraft(
     page,

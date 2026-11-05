@@ -7,6 +7,8 @@ export interface GlobalToolbarProps {
   saveState: SaveState;
   onSave: () => void;
   onRun: () => void;
+  runDisabled?: boolean;
+  runPending?: boolean;
 }
 
 /** The persistent Project-level toolbar: identity, state, save, and Run. */
@@ -16,6 +18,8 @@ export function GlobalToolbar({
   saveState,
   onSave,
   onRun,
+  runDisabled = false,
+  runPending = false,
 }: GlobalToolbarProps) {
   const projectState = project.state === 'running' ? 'Running' : 'Idle';
 
@@ -68,8 +72,20 @@ export function GlobalToolbar({
         >
           Save
         </button>
-        <button type="button" className="button button-primary" onClick={onRun}>
-          Run
+        <button
+          type="button"
+          className="button button-primary"
+          data-testid="global-run"
+          onClick={onRun}
+          disabled={runDisabled}
+          aria-busy={runPending}
+          title={
+            runDisabled
+              ? 'Validate the Workflow before starting a Run'
+              : 'Start a Run from this Workflow'
+          }
+        >
+          {runPending ? 'Starting…' : 'Run'}
         </button>
       </div>
     </header>

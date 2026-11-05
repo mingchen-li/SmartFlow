@@ -7,13 +7,19 @@ import {
   type FileReference,
   type NodeManifest,
   type Project,
+  type Run,
+  type ValidateWorkflowResponse,
+  type ValidationDiagnostic,
 } from '@sflow/domain';
 import {
   ApiError,
+  createRun,
   getWorkflow,
   listFileReferences,
   listNodeManifests,
+  listRuns,
   registerFileReference,
+  validateWorkflowDraft,
 } from '../api';
 import { useDraftAutosave } from '../editor/useDraftAutosave';
 import { useMediaQuery } from '../hooks/useMediaQuery';
@@ -51,14 +57,31 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
   const [manifests, setManifests] = useState<NodeManifest[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [validation, setValidation] = useState<ValidateWorkflowResponse | null>(null);
+  const [validatedSignature, setValidatedSignature] = useState<string | null>(null);
+  const [validating, setValidating] = useState(false);
+  const [startingRun, setStartingRun] = useState(false);
+  const [latestRun, setLatestRun] = useState<Run | null>(null);
   const selectedPathRef = useRef<string | null>(null);
   const wasMaximizedRef = useRef(false);
 
   const draftName = useEditorStore((state) => state.draftName);
   const saveState = useEditorStore((state) => state.saveState);
   const maximize = useEditorStore((state) => state.maximize);
+  const workflow = useEditorStore((state) => state.workflow);
   const hydrate = useEditorStore((state) => state.hydrate);
   const setLibraryOpen = useEditorStore((state) => state.setLibraryOpen);
+
+  // Validation is tied to Workflow content only, so layout edits (selection,
+  // position, viewport) never invalidate a passing result.
+  const workflowSignature = useMemo(() => JSON.stringify(workflow), [workflow]);
+  const validationCurrent =
+    validation !== null && validatedSignature === workflowSignature;
+  const canRun =
+    validationCurrent &&
+    validation.valid &&
+    !validating &&
+    !startingRun;
 
   const agentWidth = useLayoutStore((state) => state.agentWidth);
   const explorerCollapsed = useLayoutStore((state) => state.explorerCollapsed);
@@ -158,6 +181,22 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
       .catch(() => notify('File References could not be loaded.'));
   }, [notify]);
 
+  // Show the persisted Run history after reload; Run execution belongs to the
+  // Orchestrator, so the monitor only reports the latest stored state.
+  useEffect(() => {
+    let cancelled = false;
+    listRuns()
+      .then((response) => {
+        if (!cancelled) setLatestRun(response.runs[0] ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) notify('Run history could not be loaded.');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [notify]);
+
   // App-level maximize, not the browser Fullscreen API. Escape exits and the
   // toolbar toggle regains focus.
   useEffect(() => {
@@ -228,6 +267,83 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
     void saveNow({ notify: true });
   }, [saveNow]);
 
+  /**
+   * Validates the persisted draft. The content signature pins the result to
+   * the exact Workflow that was checked so later edits disable Run.
+   */
+  const validateDraft = useCallback(async (): Promise<ValidateWorkflowResponse | null> => {
+    if (validating) return null;
+
+    const signature = JSON.stringify(useEditorStore.getState().workflow);
+    setValidating(true);
+    try {
+      const saved = await saveNow();
+      if (!saved) {
+        notify('The Workflow draft could not be saved before validation.');
+        return null;
+      }
+
+      const result = await validateWorkflowDraft(WORKFLOW_DRAFT_ID);
+      setValidation(result);
+      setValidatedSignature(signature);
+
+      if (result.valid) {
+        notify('Workflow is valid.');
+      } else {
+        const errors = result.diagnostics.filter(
+          (diagnostic) => diagnostic.severity === 'error',
+        ).length;
+        notify(`${errors} validation error${errors === 1 ? '' : 's'} found.`);
+      }
+      return result;
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? `The Workflow could not be validated: ${error.message}`
+          : 'The Workflow could not be validated.',
+      );
+      return null;
+    } finally {
+      setValidating(false);
+    }
+  }, [notify, saveNow, validating]);
+
+  /** Re-validates before every Run; the server independently re-checks too. */
+  const startRun = useCallback(async () => {
+    if (startingRun) return;
+    setStartingRun(true);
+    try {
+      const result = await validateDraft();
+      if (!result?.valid) return;
+
+      const { run } = await createRun(WORKFLOW_DRAFT_ID);
+      setLatestRun(run);
+      notify(`Run ${run.id} queued.`);
+    } catch (error) {
+      if (
+        error instanceof ApiError &&
+        error.code === 'VALIDATION_FAILED'
+      ) {
+        const details = error.details as
+          | { diagnostics?: ValidationDiagnostic[] }
+          | undefined;
+        if (details?.diagnostics) {
+          setValidation({ valid: false, diagnostics: details.diagnostics });
+          setValidatedSignature(JSON.stringify(useEditorStore.getState().workflow));
+        }
+        notify('The Workflow does not pass validation. Correct the diagnostics and try again.');
+      } else {
+        notify(
+          error instanceof Error
+            ? `The Run could not be started: ${error.message}`
+            : 'The Run could not be started.',
+        );
+      }
+    } finally {
+      setStartingRun(false);
+    }
+  }, [notify, startingRun, validateDraft]);
+
   const explorerRail = useMemo(
     () => (
       <div className="panel-rail" data-testid="explorer-rail">
@@ -273,7 +389,9 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
         draftName={draftName}
         saveState={saveState}
         onSave={saveDraft}
-        onRun={() => notify('Run creation is not available yet.')}
+        onRun={() => void startRun()}
+        runDisabled={!canRun}
+        runPending={startingRun}
       />
 
       <div className="workspace-main">
@@ -306,9 +424,14 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
             {activeSection === 'workflows' ? (
               <WorkflowSurface
                 manifests={manifests}
-                onValidate={() => notify('Workflow validation is not available yet.')}
-                onRun={() => notify('Run creation is not available yet.')}
+                onValidate={() => void validateDraft()}
+                onRun={() => void startRun()}
                 onNotify={notify}
+                validation={validation}
+                validating={validating}
+                validationStale={validation !== null && !validationCurrent}
+                canRun={canRun}
+                runPending={startingRun}
               />
             ) : activeSection === 'terminal' ? (
               <TerminalSurface />
@@ -322,7 +445,7 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
               />
             )}
           </div>
-          <RunMonitor />
+          <RunMonitor run={latestRun} />
         </main>
 
         {!agentCollapsed ? (

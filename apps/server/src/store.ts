@@ -3,9 +3,14 @@ import { mkdirSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
+  RunSchema,
+  RunSnapshotSchema,
   WorkflowDraftSchema,
   type FileReference,
   type Project,
+  type Run,
+  type RunSnapshot,
+  type RunStatus,
   type SaveWorkflowDraftRequest,
   type WorkflowDraft,
 } from '@sflow/domain';
@@ -28,6 +33,15 @@ interface FileReferenceRow {
   name: string;
   size: number;
   registered_at: string;
+}
+
+interface RunRow {
+  id: string;
+  workflow_id: string;
+  snapshot_json: string;
+  state: string;
+  created_at: string;
+  updated_at: string;
 }
 
 const SCRYPT_KEY_LENGTH = 64;
@@ -256,6 +270,89 @@ export class ProjectStore {
       size: row.size,
       registeredAt: row.registered_at,
     };
+  }
+
+  /**
+   * Persists a Run together with its immutable, Zod-validated snapshot. The
+   * snapshot is the only source execution reads from; later draft or Manifest
+   * changes never rewrite it.
+   */
+  createRun(input: {
+    workflowId: string;
+    snapshot: RunSnapshot;
+    status?: RunStatus;
+    createdAt?: string;
+  }): Run {
+    const snapshot = RunSnapshotSchema.parse(input.snapshot);
+    const createdAt = input.createdAt ?? new Date().toISOString();
+    const run = RunSchema.parse({
+      id: randomUUID(),
+      workflowId: input.workflowId,
+      status: input.status ?? 'queued',
+      createdAt,
+      updatedAt: createdAt,
+      snapshot,
+    });
+
+    requireNamespaceId(run.id, 'Run');
+    this.ensureRunNamespace(run.id);
+
+    this.db
+      .prepare(
+        `INSERT INTO runs (id, workflow_id, snapshot_json, state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        run.id,
+        run.workflowId,
+        JSON.stringify(run.snapshot),
+        run.status,
+        run.createdAt,
+        run.updatedAt,
+      );
+
+    return run;
+  }
+
+  getRun(id: string): Run | undefined {
+    requireNamespaceId(id, 'Run');
+    const row = this.db
+      .prepare(
+        'SELECT id, workflow_id, snapshot_json, state, created_at, updated_at FROM runs WHERE id = ?',
+      )
+      .get(id) as unknown as RunRow | undefined;
+
+    return row ? this.rowToRun(row) : undefined;
+  }
+
+  /** Runs are listed newest first; rowid breaks same-millisecond ties. */
+  listRuns(): Run[] {
+    const rows = this.db
+      .prepare(
+        'SELECT id, workflow_id, snapshot_json, state, created_at, updated_at FROM runs ORDER BY created_at DESC, rowid DESC',
+      )
+      .all() as unknown as RunRow[];
+
+    return rows.flatMap((row) => {
+      const run = this.rowToRun(row);
+      return run ? [run] : [];
+    });
+  }
+
+  private rowToRun(row: RunRow): Run | undefined {
+    try {
+      const parsed = RunSchema.safeParse({
+        id: row.id,
+        workflowId: row.workflow_id,
+        status: row.state,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        snapshot: JSON.parse(row.snapshot_json),
+      });
+      return parsed.success ? parsed.data : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**

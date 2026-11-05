@@ -58,6 +58,47 @@ interface PersistedSlurmJob {
 
 const TERMINAL_STATES = new Set<TaskState>(['completed', 'failed', 'canceled']);
 
+/**
+ * Task input contract handed to the container running inside the Slurm Job.
+ *
+ * The batch script and container share the Task namespace as their working
+ * directory. Persisting the resolved parameters, inline inputs, and File
+ * References here keeps container execution independent of the Server process
+ * and makes the exact execution contract inspectable next to its outputs.
+ */
+export const SLURM_TASK_INPUT_FILE = 'task-input.json';
+export const SLURM_TASK_INPUT_VERSION = 1;
+
+interface PersistedTaskInput {
+  version: typeof SLURM_TASK_INPUT_VERSION;
+  runId: string;
+  taskId: string;
+  nodeId: string;
+  attempt: number;
+  manifestId: string;
+  manifestVersion: string;
+  parameters: Record<string, unknown>;
+  fileReferences: TaskSpec['fileReferences'];
+  inputs: Record<string, unknown>;
+  resources: TaskSpec['resources'];
+}
+
+function taskInputFor(spec: TaskSpec): PersistedTaskInput {
+  return {
+    version: SLURM_TASK_INPUT_VERSION,
+    runId: spec.runId,
+    taskId: spec.taskId,
+    nodeId: spec.nodeId,
+    attempt: spec.attempt,
+    manifestId: spec.manifestId,
+    manifestVersion: spec.manifestVersion,
+    parameters: spec.parameters,
+    fileReferences: spec.fileReferences,
+    inputs: spec.inputs,
+    resources: spec.resources,
+  };
+}
+
 function quote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -295,6 +336,10 @@ export class SlurmExecutor implements ComputeExecutor {
   async submit(spec: TaskSpec, _options: SubmitOptions = {}): Promise<SubmitResult> {
     const taskDir = resolve(spec.taskDir);
     mkdirSync(taskDir, { recursive: true });
+    writeFileSync(
+      join(taskDir, SLURM_TASK_INPUT_FILE),
+      `${JSON.stringify(taskInputFor(spec), null, 2)}\n`,
+    );
 
     const scriptPath = join(taskDir, `.sflow-${spec.taskId}-attempt-${spec.attempt}.slurm.sh`);
     writeFileSync(

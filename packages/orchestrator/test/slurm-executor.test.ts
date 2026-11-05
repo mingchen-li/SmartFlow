@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { NodeFailureKind } from '@sflow/domain';
 import {
   SlurmExecutor,
+  SLURM_TASK_INPUT_FILE,
   type PollResult,
   type TaskSpec,
 } from '@sflow/orchestrator';
@@ -116,6 +117,34 @@ describe('SlurmExecutor submission', () => {
     );
     expect(second.jobId).toBe('1002');
     expect(runner.calls.filter((call) => call.command === 'sbatch')).toHaveLength(2);
+  });
+
+  it('writes the Task input contract a container needs into the Task namespace', async () => {
+    const { executor, taskDir } = makeFixture();
+
+    await executor.submit(
+      specFor(taskDir, {
+        parameters: { seed: 9, predictor: 'esmfold2' },
+        inputs: { designs: { id: 'design-set:1', candidates: [] } },
+      }),
+    );
+
+    const input = JSON.parse(
+      readFileSync(join(taskDir, SLURM_TASK_INPUT_FILE), 'utf8'),
+    );
+    expect(input).toEqual({
+      version: 1,
+      runId: 'run-1',
+      taskId: 'task-1',
+      nodeId: 'node-1',
+      attempt: 1,
+      manifestId: 'design-node',
+      manifestVersion: '1.2.0',
+      parameters: { seed: 9, predictor: 'esmfold2' },
+      fileReferences: [],
+      inputs: { designs: { id: 'design-set:1', candidates: [] } },
+      resources: { cpu: 1, memory: '8Gi', walltimeMinutes: 30 },
+    });
   });
 });
 

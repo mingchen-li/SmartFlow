@@ -14,6 +14,7 @@ import {
   validateResultViewBindings,
   validateWorkflow,
   type ResultViewIR,
+  type NodeManifest,
   type ResultViewResponse,
   type Run,
   type RunDetailResponse,
@@ -56,6 +57,7 @@ export function registerRunRoutes(
   app: FastifyInstance,
   store: ProjectStore,
   orchestrator: Orchestrator,
+  manifests: readonly NodeManifest[] = builtinManifests,
 ): void {
   app.post('/api/workflows/:id/validate', async (request) => {
     const { id } = parseOrThrow(WorkflowParamsSchema, request.params);
@@ -64,7 +66,7 @@ export function registerRunRoutes(
       throw new HttpError(404, 'NOT_FOUND', 'Workflow draft not found.');
     }
 
-    return validateWorkflow(draft.workflow, builtinManifests, {
+    return validateWorkflow(draft.workflow, manifests, {
       requiredOutputs: BINDER_REQUIRED_OUTPUTS,
     });
   });
@@ -78,7 +80,7 @@ export function registerRunRoutes(
       throw new HttpError(404, 'NOT_FOUND', 'Workflow draft not found.');
     }
 
-    const validation = validateWorkflow(draft.workflow, builtinManifests, {
+    const validation = validateWorkflow(draft.workflow, manifests, {
       requiredOutputs: BINDER_REQUIRED_OUTPUTS,
     });
     if (!validation.valid) {
@@ -92,7 +94,7 @@ export function registerRunRoutes(
 
     const run = store.createRun({
       workflowId: id,
-      snapshot: createRunSnapshot(draft.workflow, builtinManifests),
+      snapshot: createRunSnapshot(draft.workflow, manifests),
     });
 
     // Every Run owns a durable Result View from the moment it exists, before

@@ -502,17 +502,36 @@ export function validateWorkflow(
     const producer = ir.nodes.find(
       (node) => node.manifestId === requirement.manifestId,
     );
-    if (producer) continue;
+    if (!producer) {
+      diagnostics.push(
+        error({
+          ...(sinkingNode ? { nodeId: sinkingNode.id } : {}),
+          code: 'MISSING_BINDER_OUTPUT',
+          path: 'workflow.outputs',
+          message: `The Workflow does not produce the required Binder output "${requirement.label}" because no Node with Manifest "${requirement.manifestId}" is present.`,
+          correction: requirement.correction,
+        }),
+      );
+      continue;
+    }
 
-    diagnostics.push(
-      error({
-        ...(sinkingNode ? { nodeId: sinkingNode.id } : {}),
-        code: 'MISSING_BINDER_OUTPUT',
-        path: 'workflow.outputs',
-        message: `The Workflow does not produce the required Binder output "${requirement.label}" because no Node with Manifest "${requirement.manifestId}" is present.`,
-        correction: requirement.correction,
-      }),
-    );
+    // A producer Node is not enough: the installed Manifest version must
+    // actually declare the output port the Workflow promises to produce.
+    const producerManifest = manifestByNodeId.get(producer.id);
+    if (
+      producerManifest &&
+      !producerManifest.outputs.some((port) => port.id === requirement.portId)
+    ) {
+      diagnostics.push(
+        error({
+          nodeId: producer.id,
+          code: 'MISSING_BINDER_OUTPUT',
+          path: 'workflow.outputs',
+          message: `The Workflow does not produce the required Binder output "${requirement.label}" because Node "${producer.label}" does not declare output port "${requirement.portId}".`,
+          correction: `Declare output port "${requirement.portId}" on Manifest "${requirement.manifestId}" or install a Manifest version that produces it.`,
+        }),
+      );
+    }
   }
 
   return {

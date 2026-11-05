@@ -558,6 +558,32 @@ describe('validateWorkflow', () => {
     expect(empty.diagnostics.every((diagnostic) => diagnostic.nodeId === undefined)).toBe(true);
   });
 
+  it('reports a required Binder output that the producer Manifest does not declare', () => {
+    const comparisonWithoutReport = NodeManifestSchema.parse({
+      ...comparisonManifest,
+      outputs: comparisonManifest.outputs.filter((port) => port.id !== 'report'),
+    });
+
+    const result = validateWorkflow(completeWorkflow(), [
+      targetManifest,
+      generatorManifest,
+      comparisonWithoutReport,
+    ]);
+
+    expect(result.valid).toBe(false);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        severity: 'error',
+        code: 'MISSING_BINDER_OUTPUT',
+        nodeId: 'comparison-1',
+        message:
+          'The Workflow does not produce the required Binder output "Comparison report" because Node "Candidate comparison" does not declare output port "report".',
+        correction:
+          'Declare output port "report" on Manifest "candidate-comparison" or install a Manifest version that produces it.',
+      }),
+    );
+  });
+
   it('lets a non-Binder caller opt out of the Binder output policy', () => {
     const partial = completeWorkflow();
     partial.edges = partial.edges.filter(

@@ -5,11 +5,31 @@ export const EXPLORER_MAX_WIDTH = 420;
 export const AGENT_MIN_WIDTH = 240;
 export const AGENT_MAX_WIDTH = 480;
 
+export const AGENT_FLOAT_BALL_SIZE = 58;
+export const AGENT_FLOAT_MIN_WIDTH = 280;
+export const AGENT_FLOAT_MAX_WIDTH = 520;
+export const AGENT_FLOAT_MIN_HEIGHT = 340;
+
+export interface FloatingPoint {
+  x: number;
+  y: number;
+}
+
+export interface FloatingSize {
+  width: number;
+  height: number;
+}
+
 interface LayoutState {
   explorerWidth: number;
   agentWidth: number;
   explorerCollapsed: boolean;
   agentCollapsed: boolean;
+  /** Floating Agent presentation, used only in app-level maximize. */
+  agentFloatOpen: boolean;
+  agentBallPosition: FloatingPoint | null;
+  agentPanelPosition: FloatingPoint | null;
+  agentPanelSize: FloatingSize;
   setExplorerWidth: (width: number) => void;
   setAgentWidth: (width: number) => void;
   resizeExplorerBy: (delta: number) => void;
@@ -18,6 +38,10 @@ interface LayoutState {
   setAgentCollapsed: (collapsed: boolean) => void;
   toggleExplorer: () => void;
   toggleAgent: () => void;
+  setAgentFloatOpen: (open: boolean) => void;
+  setAgentBallPosition: (position: FloatingPoint) => void;
+  setAgentPanelPosition: (position: FloatingPoint) => void;
+  setAgentPanelSize: (size: FloatingSize) => void;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -33,6 +57,10 @@ export const useLayoutStore = create<LayoutState>((set) => ({
   agentWidth: 300,
   explorerCollapsed: false,
   agentCollapsed: false,
+  agentFloatOpen: false,
+  agentBallPosition: null,
+  agentPanelPosition: null,
+  agentPanelSize: { width: 360, height: 480 },
   setExplorerWidth: (width) =>
     set({ explorerWidth: clamp(width, EXPLORER_MIN_WIDTH, EXPLORER_MAX_WIDTH) }),
   setAgentWidth: (width) =>
@@ -49,4 +77,8 @@ export const useLayoutStore = create<LayoutState>((set) => ({
   setAgentCollapsed: (collapsed) => set({ agentCollapsed: collapsed }),
   toggleExplorer: () => set((state) => ({ explorerCollapsed: !state.explorerCollapsed })),
   toggleAgent: () => set((state) => ({ agentCollapsed: !state.agentCollapsed })),
+  setAgentFloatOpen: (agentFloatOpen) => set({ agentFloatOpen }),
+  setAgentBallPosition: (agentBallPosition) => set({ agentBallPosition }),
+  setAgentPanelPosition: (agentPanelPosition) => set({ agentPanelPosition }),
+  setAgentPanelSize: (agentPanelSize) => set({ agentPanelSize }),
 }));

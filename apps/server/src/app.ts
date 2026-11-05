@@ -8,6 +8,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { createBuiltinNodeRegistry } from '@sflow/nodes';
 import { LocalExecutor, Orchestrator } from '@sflow/orchestrator';
 import { registerAuthGuard, registerAuthRoutes } from './auth';
+import { registerAgentPatchRoutes } from './agent-patches';
 import { installErrorHandler } from './errors';
 import { registerNodeRoutes } from './nodes';
 import { registerPages } from './pages';
@@ -75,6 +76,7 @@ export async function createProjectServer(
   registerNodeRoutes(app);
   registerWorkspaceRoutes(app, store);
   registerRunRoutes(app, store, orchestrator);
+  registerAgentPatchRoutes(app, store);
   registerTerminalRoute(app, store);
   registerPages(app, session, webDist);
 

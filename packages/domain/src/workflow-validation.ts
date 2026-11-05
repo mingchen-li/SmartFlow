@@ -29,6 +29,7 @@ export const ValidationDiagnosticCodeSchema = z.enum([
   'PARAMETER_ERROR',
   'RESOURCE_ERROR',
   'MISSING_BINDER_OUTPUT',
+  'PATCH_APPLICATION_ERROR',
 ]);
 export type ValidationDiagnosticCode = z.infer<typeof ValidationDiagnosticCodeSchema>;
 

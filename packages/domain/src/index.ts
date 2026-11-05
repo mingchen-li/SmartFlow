@@ -114,14 +114,18 @@ export type JsonObject = z.infer<typeof JsonObjectSchema>;
 
 /**
  * Draft persistence seam for the Workflow editor (ticket #5). The Server owns
- * `id` and `updatedAt`; workflow and layout JSON are stored verbatim so later
- * tickets can tighten their schemas without changing the persistence boundary.
+ * `id`, `updatedAt`, and `revision`; workflow and layout JSON are stored
+ * verbatim so later tickets can tighten their schemas without changing the
+ * persistence boundary. `revision` advances only when Workflow IR changes, so
+ * Agent patches are checked against the exact execution semantics they were
+ * proposed for while layout-only edits never invalidate them.
  */
 export const WorkflowDraftSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   workflow: JsonObjectSchema,
   layout: JsonObjectSchema,
+  revision: z.number().int().nonnegative(),
   updatedAt: z.string().min(1),
 });
 export type WorkflowDraft = z.infer<typeof WorkflowDraftSchema>;
@@ -141,6 +145,8 @@ export type WorkflowParams = z.infer<typeof WorkflowParamsSchema>;
 export * from './workflow';
 export * from './workflow-validation';
 export * from './run';
+export * from './json-patch';
+export * from './agent-patch';
 export * from './scientific';
 export * from './execution';
 export * from './node-run';

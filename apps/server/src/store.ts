@@ -2,7 +2,9 @@ import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypt
 import { existsSync, mkdirSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { isDeepStrictEqual } from 'node:util';
 import {
+  AgentPatchSchema,
   ArtifactSchema,
   MetricSchema,
   ResultViewIRSchema,
@@ -11,6 +13,7 @@ import {
   RunSnapshotSchema,
   TaskSchema,
   WorkflowDraftSchema,
+  type AgentPatch,
   type Artifact,
   type FileReference,
   type Metric,
@@ -43,7 +46,16 @@ interface DraftRow {
   name: string;
   draft_json: string;
   layout_json: string;
+  revision: number;
   updated_at: string;
+}
+
+interface AgentPatchRow {
+  id: string;
+  workflow_id: string;
+  patch_json: string;
+  status: string;
+  created_at: string;
 }
 
 interface FileReferenceRow {
@@ -257,7 +269,9 @@ export class ProjectStore implements OrchestratorStore {
 
   getDraft(id: string): WorkflowDraft | undefined {
     const row = this.db
-      .prepare('SELECT id, name, draft_json, layout_json, updated_at FROM workflows WHERE id = ?')
+      .prepare(
+        'SELECT id, name, draft_json, layout_json, revision, updated_at FROM workflows WHERE id = ?',
+      )
       .get(id) as unknown as DraftRow | undefined;
 
     if (!row) return undefined;
@@ -268,6 +282,7 @@ export class ProjectStore implements OrchestratorStore {
         name: row.name,
         workflow: JSON.parse(row.draft_json),
         layout: JSON.parse(row.layout_json),
+        revision: row.revision,
         updatedAt: row.updated_at,
       });
       return parsed.success ? parsed.data : undefined;
@@ -276,29 +291,86 @@ export class ProjectStore implements OrchestratorStore {
     }
   }
 
+  /**
+   * Saves the draft and advances `revision` only when the Workflow IR changes.
+   * Layout-only autosaves keep the revision stable so an Agent patch that was
+   * proposed against the same execution semantics remains applicable.
+   */
   saveDraft(id: string, input: SaveWorkflowDraftRequest): WorkflowDraft {
+    const existing = this.getDraft(id);
+    const revision = existing
+      ? existing.revision +
+        (isDeepStrictEqual(existing.workflow, input.workflow) ? 0 : 1)
+      : 1;
     const updatedAt = new Date().toISOString();
     const layout = input.layout ?? {};
 
     this.db
       .prepare(
-        `INSERT INTO workflows (id, name, draft_json, layout_json, updated_at)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO workflows (id, name, draft_json, layout_json, revision, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            draft_json = excluded.draft_json,
            layout_json = excluded.layout_json,
+           revision = excluded.revision,
            updated_at = excluded.updated_at`,
       )
-      .run(id, input.name, JSON.stringify(input.workflow), JSON.stringify(layout), updatedAt);
+      .run(
+        id,
+        input.name,
+        JSON.stringify(input.workflow),
+        JSON.stringify(layout),
+        revision,
+        updatedAt,
+      );
 
     return {
       id,
       name: input.name,
       workflow: input.workflow,
       layout,
+      revision,
       updatedAt,
     };
+  }
+
+  /** Persists an Agent proposal or one of its explicit status transitions. */
+  saveAgentPatch(patch: AgentPatch): AgentPatch {
+    const parsed = AgentPatchSchema.parse(patch);
+    this.db
+      .prepare(
+        `INSERT INTO agent_patches (id, workflow_id, patch_json, status, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           patch_json = excluded.patch_json,
+           status = excluded.status`,
+      )
+      .run(
+        parsed.id,
+        parsed.workflowId,
+        JSON.stringify(parsed),
+        parsed.status,
+        parsed.createdAt,
+      );
+    return parsed;
+  }
+
+  getAgentPatch(id: string): AgentPatch | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT id, workflow_id, patch_json, status, created_at FROM agent_patches WHERE id = ?',
+      )
+      .get(id) as unknown as AgentPatchRow | undefined;
+
+    if (!row) return undefined;
+
+    try {
+      const parsed = AgentPatchSchema.safeParse(JSON.parse(row.patch_json));
+      return parsed.success ? parsed.data : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -405,6 +477,22 @@ export class ProjectStore implements OrchestratorStore {
     });
 
     return run;
+  }
+
+  /** Non-terminal Runs, rebuilt by restart reconciliation. */
+  listActiveRuns(): Run[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, workflow_id, snapshot_json, state, created_at, updated_at
+         FROM runs WHERE state IN ('queued', 'running')
+         ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all() as unknown as RunRow[];
+
+    return rows.flatMap((row) => {
+      const run = this.rowToRun(row);
+      return run ? [run] : [];
+    });
   }
 
   getRun(id: string): Run | undefined {
@@ -582,6 +670,28 @@ export class ProjectStore implements OrchestratorStore {
     } catch {
       return undefined;
     }
+  }
+
+  findArtifact(taskId: string, name: string): Artifact | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id, run_id, task_id, node_id, name, media_type, path, sha256, size,
+                schema_json, provenance_json, created_at
+         FROM artifacts WHERE task_id = ? AND name = ?`,
+      )
+      .get(taskId, name) as unknown as ArtifactRow | undefined;
+    return row ? this.rowToArtifact(row) : undefined;
+  }
+
+  findMetric(taskId: string, metricId: string): Metric | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id, run_id, task_id, node_id, metric_id, name, meaning, value_type, value_json,
+                unit, scale_json, direction, schema_json, provenance_json, created_at
+         FROM metrics WHERE task_id = ? AND metric_id = ?`,
+      )
+      .get(taskId, metricId) as unknown as MetricRow | undefined;
+    return row ? this.rowToMetric(row) : undefined;
   }
 
   /**
@@ -989,6 +1099,7 @@ export class ProjectStore implements OrchestratorStore {
         name TEXT NOT NULL,
         draft_json TEXT NOT NULL,
         layout_json TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL
       );
 
@@ -1097,7 +1208,19 @@ export class ProjectStore implements OrchestratorStore {
       CREATE INDEX IF NOT EXISTS runs_workflow_id ON runs(workflow_id);
       CREATE INDEX IF NOT EXISTS tasks_run_id ON tasks(run_id);
       CREATE INDEX IF NOT EXISTS events_run_id ON events(run_id);
+      CREATE INDEX IF NOT EXISTS agent_patches_workflow_id ON agent_patches(workflow_id);
     `);
+
+    // Databases created before Agent patches (ticket #15) lack the draft
+    // revision column; add it in place and keep existing drafts at revision 0.
+    const workflowColumns = this.db
+      .prepare('PRAGMA table_info(workflows)')
+      .all() as unknown as Array<{ name: string }>;
+    if (!workflowColumns.some((column) => column.name === 'revision')) {
+      this.db.exec(
+        'ALTER TABLE workflows ADD COLUMN revision INTEGER NOT NULL DEFAULT 0',
+      );
+    }
 
     // Ticket #6 projects may already have the placeholder Task/Artifact/Metric
     // tables. Add the execution columns in place so upgrades keep Run history.

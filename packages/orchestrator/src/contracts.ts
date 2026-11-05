@@ -187,6 +187,8 @@ export interface NewRunEvent {
  */
 export interface OrchestratorStore {
   getRun(runId: string): Run | undefined;
+  /** Runs whose persisted status is not terminal, for startup reconciliation. */
+  listActiveRuns(): Run[];
   updateRunStatus(runId: string, status: Run['status']): void;
 
   listTasks(runId: string): Task[];
@@ -196,6 +198,9 @@ export interface OrchestratorStore {
   saveTaskOutputs(taskId: string, outputs: TaskOutputRecord[]): void;
   getTaskOutputs(taskId: string): TaskOutputRecord[] | undefined;
 
+  /** Existing immutable records for a Task attempt, used for idempotent replay. */
+  findArtifact(taskId: string, name: string): Artifact | undefined;
+  findMetric(taskId: string, metricId: string): Metric | undefined;
   recordArtifact(input: NewArtifactRecord): Artifact;
   recordMetric(input: NewMetricRecord): Metric;
   appendEvent(input: NewRunEvent): RunEvent;

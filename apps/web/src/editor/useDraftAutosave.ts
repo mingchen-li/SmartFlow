@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from 'react';
-import type { SaveWorkflowDraftRequest } from '@sflow/domain';
+import type { SaveWorkflowDraftRequest, WorkflowDraft } from '@sflow/domain';
 import { saveWorkflow } from '../api';
 import { useEditorStore } from '../store/editor';
 
@@ -13,7 +13,11 @@ export interface AutosaveOptions {
 }
 
 export interface AutosaveController {
-  saveNow: (options?: { notify?: boolean }) => Promise<boolean>;
+  /**
+   * Saves immediately and returns the persisted draft (including its Workflow
+   * IR revision), or null when hydration or the request failed.
+   */
+  saveNow: (options?: { notify?: boolean }) => Promise<WorkflowDraft | null>;
 }
 
 /**
@@ -32,7 +36,7 @@ export function useDraftAutosave({
   const savedRevision = useEditorStore((state) => state.savedRevision);
 
   const saveNow = useCallback(
-    async ({ notify = false }: { notify?: boolean } = {}): Promise<boolean> => {
+    async ({ notify = false }: { notify?: boolean } = {}): Promise<WorkflowDraft | null> => {
       // Explicit Save may be clicked before the initial draft GET settles.
       // Wait briefly so an existing draft is never overwritten with defaults.
       const deadline = Date.now() + 5_000;
@@ -43,7 +47,7 @@ export function useDraftAutosave({
       }
 
       const state = useEditorStore.getState();
-      if (!state.hydrated) return false;
+      if (!state.hydrated) return null;
 
       const savedRevisionAtStart = state.revision;
       const payload: SaveWorkflowDraftRequest = {
@@ -54,14 +58,14 @@ export function useDraftAutosave({
 
       state.setSaveState('saving');
       try {
-        await saveWorkflow(draftId, payload);
-        useEditorStore.getState().markSaved(savedRevisionAtStart);
+        const saved = await saveWorkflow(draftId, payload);
+        useEditorStore.getState().markSaved(savedRevisionAtStart, saved.revision);
         if (notify) onSaved?.();
-        return true;
+        return saved;
       } catch {
         useEditorStore.getState().setSaveState('error');
         if (notify) onError?.();
-        return false;
+        return null;
       }
     },
     [draftId, onError, onSaved],

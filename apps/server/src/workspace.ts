@@ -1,8 +1,9 @@
 import { readdir, stat } from 'node:fs/promises';
-import { resolve, sep } from 'node:path';
+import { basename, resolve, sep } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import {
   FileListQuerySchema,
+  RegisterFileReferenceRequestSchema,
   SaveWorkflowDraftRequestSchema,
   WorkflowParamsSchema,
   type FileEntry,
@@ -32,22 +33,56 @@ function normalizeRequestedPath(input: string | undefined): string {
   return normalized;
 }
 
+function resolveProjectPath(root: string, requestedPath: string): string {
+  const absolutePath = resolve(root, requestedPath);
+  if (absolutePath !== root && !absolutePath.startsWith(`${root}${sep}`)) {
+    throw new HttpError(400, 'INVALID_PATH', 'Project file paths must stay inside the Project.');
+  }
+  return absolutePath;
+}
+
 /**
- * Minimal, read-only Project browsing seam used by the workspace shell. Ticket
- * #3 extends this with File References and selection state. `.sflow/` is never
- * listed or addressable.
+ * Project filesystem seam for the workspace shell. Ticket #3 adds path-backed
+ * File References: selecting a file records its location, never a copy or a
+ * digest. `.sflow/` is never listed or addressable.
  */
 export function registerWorkspaceRoutes(app: FastifyInstance, store: ProjectStore): void {
   app.get('/api/project', async () => store.getProject());
 
+  app.get('/api/files/references', async () => ({ references: store.listFileReferences() }));
+
+  app.post('/api/files', async (request) => {
+    const input = parseOrThrow(RegisterFileReferenceRequestSchema, request.body);
+    const requestedPath = normalizeRequestedPath(input.path);
+    if (!requestedPath) {
+      throw new HttpError(400, 'INVALID_PATH', 'A Project file path is required.');
+    }
+
+    const absolutePath = resolveProjectPath(store.root, requestedPath);
+
+    let stats;
+    try {
+      stats = await stat(absolutePath);
+    } catch {
+      throw new HttpError(404, 'NOT_FOUND', 'The requested path does not exist.');
+    }
+
+    if (!stats.isFile()) {
+      throw new HttpError(400, 'NOT_A_FILE', 'The requested path is not a file.');
+    }
+
+    // Only filesystem metadata is read; contents stay in the Project.
+    return store.registerFileReference({
+      path: requestedPath,
+      name: basename(requestedPath),
+      size: stats.size,
+    });
+  });
+
   app.get('/api/files', async (request) => {
     const query = parseOrThrow(FileListQuerySchema, request.query);
     const requestedPath = normalizeRequestedPath(query.path);
-    const absolutePath = resolve(store.root, requestedPath);
-
-    if (absolutePath !== store.root && !absolutePath.startsWith(`${store.root}${sep}`)) {
-      throw new HttpError(400, 'INVALID_PATH', 'Project file paths must stay inside the Project.');
-    }
+    const absolutePath = resolveProjectPath(store.root, requestedPath);
 
     let stats;
     try {

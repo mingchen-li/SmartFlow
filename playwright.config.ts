@@ -1,9 +1,21 @@
-import { existsSync, mkdtempSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
 
 const projectDir = mkdtempSync(join(tmpdir(), 'sflow-e2e-'));
+
+// Seed a Project filesystem for the file explorer and File Reference specs.
+mkdirSync(join(projectDir, 'inputs'), { recursive: true });
+mkdirSync(join(projectDir, 'designs', 'round-1'), { recursive: true });
+writeFileSync(join(projectDir, 'target.pdb'), 'HEADER TARGET\n');
+writeFileSync(join(projectDir, 'inputs', 'candidates.fasta'), '>candidate-1\nMKTAYIAKQR\n');
+writeFileSync(join(projectDir, 'designs', 'round-1', 'design-001.pdb'), 'HEADER DESIGN\n');
+// Enough root entries that the tree owns a scrollbar inside the fixed viewport.
+for (let index = 0; index < 30; index += 1) {
+  writeFileSync(join(projectDir, `bulk-${String(index).padStart(3, '0')}.txt`), `entry ${index}\n`);
+}
+
 const port = Number(process.env.SFLOW_E2E_PORT ?? 4273);
 const baseURL = `http://127.0.0.1:${port}`;
 

@@ -7,6 +7,9 @@
  * monitoring of one atomic Node attempt; LocalExecutor implements that
  * contract deterministically in-process.
  */
+export * from './command-runner';
 export * from './contracts';
 export * from './local-executor';
+export * from './node-command-runner';
 export * from './orchestrator';
+export * from './slurm-executor';

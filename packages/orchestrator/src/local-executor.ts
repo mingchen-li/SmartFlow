@@ -47,6 +47,8 @@ export interface LocalExecutorOptions {
 }
 
 interface PersistedJob {
+  /** Discriminator so Local and Slurm executors never adopt each other's jobs. */
+  executor?: 'local';
   jobId: string;
   runId: string;
   taskId: string;
@@ -125,6 +127,7 @@ export class LocalExecutor implements ComputeExecutor {
     const logsPath = join(taskDir, 'logs.txt');
 
     const job: PersistedJob = {
+      executor: 'local',
       jobId,
       runId: spec.runId,
       taskId: spec.taskId,
@@ -480,7 +483,10 @@ export class LocalExecutor implements ComputeExecutor {
 
   private read(path: string): PersistedJob | undefined {
     try {
-      return JSON.parse(readFileSync(path, 'utf8')) as PersistedJob;
+      const parsed = JSON.parse(readFileSync(path, 'utf8')) as PersistedJob;
+      // Records written before the discriminator existed are local jobs. Slurm
+      // records in a shared jobs directory must never be adopted here.
+      return parsed.executor === undefined || parsed.executor === 'local' ? parsed : undefined;
     } catch {
       return undefined;
     }

@@ -3,6 +3,7 @@ import {
   createEmptyEditorLayout,
   createEmptyWorkflow,
   EditorLayoutSchema,
+  findManifest,
   WorkflowIRSchema,
   type FileReference,
   type NodeManifest,
@@ -23,11 +24,14 @@ import {
 } from '../api';
 import { useDraftAutosave } from '../editor/useDraftAutosave';
 import { useMediaQuery } from '../hooks/useMediaQuery';
+import { useAgentStore } from '../store/agent';
 import { useEditorStore } from '../store/editor';
 import { useLayoutStore } from '../store/layout';
 import { AgentPanel } from './AgentPanel';
 import { FileExplorer } from './FileExplorer';
+import { FloatingAgent } from './FloatingAgent';
 import { GlobalToolbar } from './GlobalToolbar';
+import { NodeInspector } from './NodeInspector';
 import { PrimaryNav, type WorkspaceSection } from './PrimaryNav';
 import { ResizeHandle } from './ResizeHandle';
 import { RunMonitor } from './RunMonitor';
@@ -69,8 +73,13 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
   const saveState = useEditorStore((state) => state.saveState);
   const maximize = useEditorStore((state) => state.maximize);
   const workflow = useEditorStore((state) => state.workflow);
+  const selectedNodeId = useEditorStore((state) => state.layout.selection.nodeId);
   const hydrate = useEditorStore((state) => state.hydrate);
   const setLibraryOpen = useEditorStore((state) => state.setLibraryOpen);
+  const applyAgentPatchWorkflow = useEditorStore(
+    (state) => state.applyAgentPatchWorkflow,
+  );
+  const setAgentMode = useAgentStore((state) => state.setMode);
 
   // Validation is tied to Workflow content only, so layout edits (selection,
   // position, viewport) never invalidate a passing result.
@@ -86,6 +95,7 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
   const agentWidth = useLayoutStore((state) => state.agentWidth);
   const explorerCollapsed = useLayoutStore((state) => state.explorerCollapsed);
   const agentCollapsed = useLayoutStore((state) => state.agentCollapsed);
+  const agentFloatOpen = useLayoutStore((state) => state.agentFloatOpen);
   const resizeExplorerBy = useLayoutStore((state) => state.resizeExplorerBy);
   const resizeAgentBy = useLayoutStore((state) => state.resizeAgentBy);
   const setExplorerCollapsed = useLayoutStore((state) => state.setExplorerCollapsed);
@@ -95,6 +105,13 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
 
   const narrow = useMediaQuery('(max-width: 899px)');
   const veryNarrow = useMediaQuery('(max-width: 719px)');
+
+  const selectedNode = selectedNodeId
+    ? workflow.nodes.find((node) => node.id === selectedNodeId)
+    : undefined;
+  const selectedManifest = selectedNode
+    ? findManifest(manifests, selectedNode.manifestId, selectedNode.manifestVersion)
+    : undefined;
 
   const notify = useCallback((message: string) => {
     setToast(message);
@@ -128,6 +145,13 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
     setAgentCollapsed(veryNarrow);
   }, [veryNarrow, setAgentCollapsed]);
 
+  // Selecting a Node activates Node Agent; clearing the selection returns to
+  // the Workflow Agent default. A manual mode change lasts until the next
+  // selection change.
+  useEffect(() => {
+    setAgentMode(selectedNodeId ? 'node' : 'workflow');
+  }, [selectedNodeId, setAgentMode]);
+
   // Hydrate the editor document from the persisted draft. Unknown or older
   // layouts fall back safely; a 404 starts a new draft.
   useEffect(() => {
@@ -142,6 +166,7 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
           name: saved.name,
           workflow: workflow.success ? workflow.data : createEmptyWorkflow(),
           layout: layout.success ? layout.data : createEmptyEditorLayout(),
+          revision: saved.revision,
         });
       })
       .catch((error: unknown) => {
@@ -153,6 +178,7 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
           name: 'Binder design',
           workflow: createEmptyWorkflow(),
           layout: createEmptyEditorLayout(),
+          revision: 0,
         });
       });
 
@@ -448,7 +474,7 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
           <RunMonitor run={latestRun} />
         </main>
 
-        {!agentCollapsed ? (
+        {!maximize && !agentCollapsed ? (
           <>
             <ResizeHandle
               label="Resize agent panel"
@@ -459,12 +485,45 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
             <AgentPanel
               width={agentWidth}
               onCollapse={toggleAgent}
+              draftId={WORKFLOW_DRAFT_ID}
               manifests={manifests}
               fileReferences={fileReferences}
+              saveNow={saveNow}
+              onWorkflowApplied={applyAgentPatchWorkflow}
+              onNotify={notify}
             />
           </>
         ) : null}
         {agentCollapsed ? agentRail : null}
+        {maximize && !agentCollapsed ? (
+          <FloatingAgent
+            draftId={WORKFLOW_DRAFT_ID}
+            manifests={manifests}
+            fileReferences={fileReferences}
+            saveNow={saveNow}
+            onWorkflowApplied={applyAgentPatchWorkflow}
+            onNotify={notify}
+          />
+        ) : null}
+        {/*
+          Maximize presents the Agent as the floating ball, but the selected
+          Node's inspector remains mounted so entering/leaving maximize never
+          tears down the Node editing context. It is hidden while the ball is
+          collapsed and unmounts when the floating panel provides its own.
+        */}
+        {maximize &&
+        !agentCollapsed &&
+        !agentFloatOpen &&
+        selectedNode &&
+        selectedManifest ? (
+          <div className="agent-maximized-context-proxy" hidden>
+            <NodeInspector
+              instance={selectedNode}
+              manifest={selectedManifest}
+              fileReferences={fileReferences}
+            />
+          </div>
+        ) : null}
       </div>
 
       {settingsOpen ? (

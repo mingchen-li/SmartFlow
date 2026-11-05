@@ -6,6 +6,7 @@ import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { registerAuthGuard, registerAuthRoutes } from './auth';
+import { registerAgentPatchRoutes } from './agent-patches';
 import { installErrorHandler } from './errors';
 import { registerNodeRoutes } from './nodes';
 import { registerPages } from './pages';
@@ -66,6 +67,7 @@ export async function createProjectServer(
   registerNodeRoutes(app);
   registerWorkspaceRoutes(app, store);
   registerRunRoutes(app, store);
+  registerAgentPatchRoutes(app, store);
   registerTerminalRoute(app, store);
   registerPages(app, session, webDist);
 

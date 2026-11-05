@@ -1,4 +1,7 @@
 import type {
+  AgentPatchProposalRequest,
+  AgentPatchResponse,
+  AgentPatchWorkflowResponse,
   CreateRunResponse,
   ErrorResponse,
   FileListResponse,
@@ -152,4 +155,43 @@ export function getRun(id: string): Promise<Run> {
 
 export function listRuns(): Promise<RunListResponse> {
   return apiGet<RunListResponse>('/api/runs');
+}
+
+/**
+ * Validated Agent patch boundary. A proposal is previewed and validated by the
+ * Server; only an explicit apply mutates the draft Workflow IR.
+ */
+export function proposeAgentPatch(
+  workflowId: string,
+  proposal: AgentPatchProposalRequest,
+): Promise<AgentPatchResponse> {
+  return apiPost<AgentPatchResponse>(
+    `/api/workflows/${encodeURIComponent(workflowId)}/agent/patches`,
+    proposal,
+  );
+}
+
+export function getAgentPatch(id: string): Promise<AgentPatchResponse> {
+  return apiGet<AgentPatchResponse>(`/api/agent/patches/${encodeURIComponent(id)}`);
+}
+
+export function applyAgentPatch(id: string): Promise<AgentPatchWorkflowResponse> {
+  return apiPost<AgentPatchWorkflowResponse>(
+    `/api/agent/patches/${encodeURIComponent(id)}/apply`,
+    {},
+  );
+}
+
+export function revertAgentPatch(id: string): Promise<AgentPatchWorkflowResponse> {
+  return apiPost<AgentPatchWorkflowResponse>(
+    `/api/agent/patches/${encodeURIComponent(id)}/revert`,
+    {},
+  );
+}
+
+export function rejectAgentPatch(id: string): Promise<AgentPatchResponse> {
+  return apiPost<AgentPatchResponse>(
+    `/api/agent/patches/${encodeURIComponent(id)}/reject`,
+    {},
+  );
 }

@@ -222,3 +222,13 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,macos,linux
+
+### Node / SFlow ###
+node_modules/
+.pnpm-store/
+build/
+coverage/
+test-results/
+playwright-report/
+.sflow/
+*.tsbuildinfo

@@ -9,9 +9,10 @@ import { GlobalToolbar } from './GlobalToolbar';
 import { PrimaryNav, type WorkspaceSection } from './PrimaryNav';
 import { ResizeHandle } from './ResizeHandle';
 import { RunMonitor } from './RunMonitor';
-import { SettingsDialog } from './SettingsDialog';
-import { WorkflowSurface } from './WorkflowSurface';
 import { SectionSurface } from './SectionSurface';
+import { SettingsDialog } from './SettingsDialog';
+import { TerminalSurface } from './TerminalSurface';
+import { WorkflowSurface } from './WorkflowSurface';
 
 export const WORKFLOW_DRAFT_ID = 'binder-design';
 
@@ -187,6 +188,8 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
                 onNavigate={setActiveSection}
                 onValidate={() => notify('Workflow validation is not available yet.')}
               />
+            ) : activeSection === 'terminal' ? (
+              <TerminalSurface />
             ) : (
               <SectionSurface
                 section={activeSection}

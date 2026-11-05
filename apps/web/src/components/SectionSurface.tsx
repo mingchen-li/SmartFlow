@@ -1,14 +1,14 @@
 import type { WorkspaceSection } from './PrimaryNav';
 
 export interface SectionSurfaceProps {
-  section: Exclude<WorkspaceSection, 'workflows'>;
+  section: Exclude<WorkspaceSection, 'workflows' | 'terminal'>;
   selectedFilePath: string | null;
   onNavigate: (section: WorkspaceSection) => void;
 }
 
 /**
  * Non-canvas workspace sections. Later tickets replace these placeholders with
- * the file-backed Workflow browser, Node Library, terminal, and Run history.
+ * the file-backed Workflow browser, Node Library, and Run history.
  */
 export function SectionSurface({ section, selectedFilePath, onNavigate }: SectionSurfaceProps) {
   return (
@@ -35,19 +35,6 @@ export function SectionSurface({ section, selectedFilePath, onNavigate }: Sectio
               parameters, and scientific outputs it provides.
             </p>
             <p className="muted">No Node Manifests are installed in this Project yet.</p>
-          </>
-        ) : null}
-
-        {section === 'terminal' ? (
-          <>
-            <h2>Terminal</h2>
-            <p>
-              The integrated terminal is an authenticated escape hatch for direct Project commands.
-              It is not available yet.
-            </p>
-            <p className="muted">
-              Terminal commands are intentionally outside Run, Task, and Provenance history.
-            </p>
           </>
         ) : null}
 

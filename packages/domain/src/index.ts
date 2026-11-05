@@ -113,3 +113,69 @@ export const WorkflowParamsSchema = z.object({
   id: z.string().min(1).max(200),
 });
 export type WorkflowParams = z.infer<typeof WorkflowParamsSchema>;
+
+/**
+ * `WS /api/terminal` protocol.
+ *
+ * The terminal is an authenticated escape hatch: direct commands run under the
+ * deployment's OS permissions and are intentionally outside Run/Task/
+ * Provenance tracking. Messages are JSON frames so both sides share one typed
+ * contract. Resize frames are validated and acknowledged, but the Server uses a
+ * `child_process` shell rather than a PTY, so they cannot resize a live shell.
+ */
+export const TERMINAL_MAX_INPUT_CHARS = 64 * 1024;
+
+export const TerminalClientMessageSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('input'),
+    data: z.string().min(1).max(TERMINAL_MAX_INPUT_CHARS),
+  }),
+  z.object({
+    type: z.literal('resize'),
+    cols: z.number().int().min(1).max(1_000),
+    rows: z.number().int().min(1).max(1_000),
+  }),
+]);
+export type TerminalClientMessage = z.infer<typeof TerminalClientMessageSchema>;
+
+export const TerminalErrorMessageSchema = z.object({
+  type: z.literal('error'),
+  error: ErrorResponseSchema.shape.error,
+});
+export type TerminalErrorMessage = z.infer<typeof TerminalErrorMessageSchema>;
+
+export const TerminalReadyMessageSchema = z.object({
+  type: z.literal('ready'),
+  cwd: z.string().min(1),
+  shell: z.string().min(1),
+});
+export type TerminalReadyMessage = z.infer<typeof TerminalReadyMessageSchema>;
+
+export const TerminalOutputMessageSchema = z.object({
+  type: z.literal('output'),
+  data: z.string(),
+});
+export type TerminalOutputMessage = z.infer<typeof TerminalOutputMessageSchema>;
+
+export const TerminalResizedMessageSchema = z.object({
+  type: z.literal('resized'),
+  cols: z.number().int().min(1),
+  rows: z.number().int().min(1),
+});
+export type TerminalResizedMessage = z.infer<typeof TerminalResizedMessageSchema>;
+
+export const TerminalExitMessageSchema = z.object({
+  type: z.literal('exit'),
+  code: z.number().int().nullable(),
+  signal: z.string().nullable(),
+});
+export type TerminalExitMessage = z.infer<typeof TerminalExitMessageSchema>;
+
+export const TerminalServerMessageSchema = z.discriminatedUnion('type', [
+  TerminalReadyMessageSchema,
+  TerminalOutputMessageSchema,
+  TerminalResizedMessageSchema,
+  TerminalExitMessageSchema,
+  TerminalErrorMessageSchema,
+]);
+export type TerminalServerMessage = z.infer<typeof TerminalServerMessageSchema>;

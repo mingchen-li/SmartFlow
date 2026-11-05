@@ -62,7 +62,7 @@ export async function createProjectServer(
   registerAuthGuard(app, session);
   registerAuthRoutes(app, store, session);
   registerWorkspaceRoutes(app, store);
-  registerTerminalRoute(app);
+  registerTerminalRoute(app, store);
   registerPages(app, session, webDist);
 
   const assetsDir = join(webDist, 'assets');

@@ -21,6 +21,7 @@ import {
   ApiError,
   cancelRun,
   createRun,
+  getProject,
   getRun,
   getRunEvents,
   getWorkflow,
@@ -64,7 +65,8 @@ export interface WorkspaceProps {
  * EditorLayout are persisted with the draft; panel geometry, maximize mode,
  * Node Library state, and selection presentation are app state outside it.
  */
-export function Workspace({ project, onSignedOut }: WorkspaceProps) {
+export function Workspace({ project: initialProject, onSignedOut }: WorkspaceProps) {
+  const [project, setProject] = useState(initialProject);
   const [activeSection, setActiveSection] = useState<WorkspaceSection>('workflows');
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
   const [selectedReference, setSelectedReference] = useState<FileReference | null>(null);
@@ -241,6 +243,24 @@ export function Workspace({ project, onSignedOut }: WorkspaceProps) {
       })
       .catch(() => notify('File References could not be loaded.'));
   }, [notify]);
+
+  // The Project state is derived by the Server from active Runs. The session
+  // snapshot is taken at login, so refresh it whenever the observed Run
+  // reaches a different status instead of leaving the toolbar frozen.
+  const latestRunStatus = latestRun?.status;
+  useEffect(() => {
+    let cancelled = false;
+    getProject()
+      .then((next) => {
+        if (!cancelled) setProject(next);
+      })
+      .catch(() => {
+        // Keep the last known Project state; Run polling reports outages.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [latestRunStatus]);
 
   // Show the persisted Run history after reload; Run execution belongs to the
   // Orchestrator, so the monitor only reports the latest stored state.

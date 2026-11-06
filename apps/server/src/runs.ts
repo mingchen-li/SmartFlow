@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import type { FastifyInstance } from 'fastify';
@@ -218,6 +219,19 @@ export function registerRunRoutes(
         bytes = readFileSync(absolute);
       } catch {
         throw new HttpError(404, 'NOT_FOUND', 'Artifact bytes are unavailable.');
+      }
+
+      // Managed Artifacts are immutable. Never serve bytes that no longer
+      // match the digest recorded with the Artifact: the ETag and one-year
+      // immutable cache below advertise that recorded digest, so changed bytes
+      // must fail rather than silently replace a referenced result.
+      const digest = createHash('sha256').update(bytes).digest('hex');
+      if (digest !== artifact.sha256) {
+        throw new HttpError(
+          409,
+          'ARTIFACT_INTEGRITY_FAILED',
+          'Artifact bytes do not match the recorded digest.',
+        );
       }
 
       const filename = artifact.name.replace(/["\\\r\n]/g, '_');

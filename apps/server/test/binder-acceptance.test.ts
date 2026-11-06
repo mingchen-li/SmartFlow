@@ -294,7 +294,7 @@ describe('Deterministic Binder acceptance path', () => {
       'candidate-0005',
     ]);
     expect(new Set(candidates.candidates.map((candidate) => candidate.sequence)).size).toBe(5);
-    expect(candidates.scores).toEqual([]);
+    expect(candidates.metricValues).toEqual([]);
 
     expect(designs.context).toEqual({
       strategy: 'vhh-designer-v1',
@@ -309,7 +309,7 @@ describe('Deterministic Binder acceptance path', () => {
         candidates.candidates.some((parent) => parent.id === candidate.parentId),
       ),
     ).toBe(true);
-    expect(designs.scores.map((score) => score.metricId)).toEqual([
+    expect(designs.metricValues.map((metricValue) => metricValue.metricId)).toEqual([
       'sequence-confidence',
       'sequence-confidence',
       'sequence-confidence',
@@ -323,8 +323,8 @@ describe('Deterministic Binder acceptance path', () => {
       parameters: { recycles: 3, batchSize: 4 },
     });
     expect(scored.candidates).toHaveLength(3);
-    expect(scored.scores).toHaveLength(6);
-    expect(new Set(scored.scores.map((score) => score.metricId))).toEqual(
+    expect(scored.metricValues).toHaveLength(6);
+    expect(new Set(scored.metricValues.map((metricValue) => metricValue.metricId))).toEqual(
       new Set(['plddt', 'iptm']),
     );
 
@@ -335,11 +335,11 @@ describe('Deterministic Binder acceptance path', () => {
       parameters: { rankingMetric: 'plddt', topN: 2, deduplicate: true },
     });
     expect(ranking.candidates).toHaveLength(2);
-    const scoredPlddt = scored.scores
-      .filter((score) => score.metricId === 'plddt')
+    const scoredPlddt = scored.metricValues
+      .filter((metricValue) => metricValue.metricId === 'plddt')
       .sort((left, right) => right.value - left.value);
     expect(ranking.candidates.map((candidate) => candidate.id)).toEqual(
-      scoredPlddt.slice(0, 2).map((score) => score.candidateId),
+      scoredPlddt.slice(0, 2).map((metricValue) => metricValue.candidateId),
     );
 
     const report = ComparisonReportSchema.parse(
@@ -352,11 +352,11 @@ describe('Deterministic Binder acceptance path', () => {
       rankingMetric: 'plddt',
       candidateCount: 3,
       selectedCount: 2,
-      bestScore: scoredPlddt[0]!.value,
+      bestMetricValue: scoredPlddt[0]!.value,
     });
     expect(report.entries.map((entry) => entry.rank)).toEqual([1, 2]);
-    expect(report.entries.map((entry) => entry.score)).toEqual(
-      scoredPlddt.slice(0, 2).map((score) => score.value),
+    expect(report.entries.map((entry) => entry.rankingMetricValue)).toEqual(
+      scoredPlddt.slice(0, 2).map((metricValue) => metricValue.value),
     );
 
     // Typed Metrics retain meaning, scale, namespaced schema, and Provenance.
@@ -403,7 +403,7 @@ describe('Deterministic Binder acceptance path', () => {
         version: '1.0.0',
       },
     });
-    expect(metric('bestPlddt').value).toBe(report.bestScore);
+    expect(metric('bestPlddt').value).toBe(report.bestMetricValue);
     for (const item of detail.metrics) {
       expect(item.provenance).toMatchObject({
         runId: created.id,

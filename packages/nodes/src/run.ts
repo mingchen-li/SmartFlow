@@ -124,12 +124,13 @@ function asCandidateSet(value: unknown, portName: string): CandidateSet {
   return parsed.data;
 }
 
-function asNumberMap(scores: CandidateSet['scores']): Map<string, Map<string, number>> {
+function asNumberMap(metricValues: CandidateSet['metricValues']): Map<string, Map<string, number>> {
   const byCandidate = new Map<string, Map<string, number>>();
-  for (const score of scores) {
-    const metrics = byCandidate.get(score.candidateId) ?? new Map<string, number>();
-    metrics.set(score.metricId, score.value);
-    byCandidate.set(score.candidateId, metrics);
+  for (const metricValue of metricValues) {
+    const metrics =
+      byCandidate.get(metricValue.candidateId) ?? new Map<string, number>();
+    metrics.set(metricValue.metricId, metricValue.value);
+    byCandidate.set(metricValue.candidateId, metrics);
   }
   return byCandidate;
 }
@@ -298,7 +299,7 @@ export function runCandidateGeneration(
     id: `candidate-set:${strategy}:${seed}:${numCandidates}`,
     name: 'Generated candidates',
     candidates,
-    scores: [],
+    metricValues: [],
     context: {
       strategy,
       seed,
@@ -381,7 +382,7 @@ export function runSequenceDesign(
     };
   });
 
-  const scores = designs.map((design) => ({
+  const metricValues = designs.map((design) => ({
     candidateId: design.id,
     metricId: 'sequence-confidence',
     value: round(
@@ -394,7 +395,7 @@ export function runSequenceDesign(
     id: `design-set:${model}:${randomSeed}:${designCount}`,
     name: 'Designed sequences',
     candidates: designs,
-    scores,
+    metricValues,
     context: {
       strategy: model,
       seed: randomSeed,
@@ -405,9 +406,13 @@ export function runSequenceDesign(
   });
 
   const meanConfidence =
-    scores.length === 0
+    metricValues.length === 0
       ? 0
-      : round(scores.reduce((sum, score) => sum + score.value, 0) / scores.length, 4);
+      : round(
+          metricValues.reduce((sum, metricValue) => sum + metricValue.value, 0) /
+            metricValues.length,
+          4,
+        );
 
   context.log(`designed count=${designSet.candidates.length}`);
   context.log(`designed model=${model} seed=${randomSeed}`);
@@ -455,13 +460,13 @@ export function runStructurePrediction(
     throw new NodeExecutionError('parameter', 'Parameter "seed" must be an integer.');
   }
 
-  const scores: CandidateSet['scores'] = [];
+  const metricValues: CandidateSet['metricValues'] = [];
   const structures: Array<{ candidateId: string; pdb: string }> = [];
 
   for (const candidate of designs.candidates) {
     const plddt = round(40 + (hashSeed(seed, 'plddt', candidate.sequence) % 6000) / 100, 2);
     const iptm = round((hashSeed(seed, 'iptm', candidate.sequence) % 10_000) / 10_000, 4);
-    scores.push(
+    metricValues.push(
       { candidateId: candidate.id, metricId: 'plddt', value: plddt },
       { candidateId: candidate.id, metricId: 'iptm', value: iptm },
     );
@@ -481,7 +486,7 @@ export function runStructurePrediction(
     id: `scored-set:${predictor}:${seed}:${designs.id}`,
     name: 'Scored candidates',
     candidates: designs.candidates,
-    scores,
+    metricValues,
     context: {
       strategy: 'structure-prediction',
       seed,
@@ -494,7 +499,7 @@ export function runStructurePrediction(
     },
   });
 
-  const byCandidate = asNumberMap(scores);
+  const byCandidate = asNumberMap(metricValues);
   const plddtValues: number[] = [];
   const iptmValues: number[] = [];
   for (const metrics of byCandidate.values()) {
@@ -571,7 +576,7 @@ export function runStructurePrediction(
   };
 }
 
-function scoreFor(candidateId: string, metricId: string, byCandidate: Map<string, Map<string, number>>): number {
+function metricValueFor(candidateId: string, metricId: string, byCandidate: Map<string, Map<string, number>>): number {
   const metrics = byCandidate.get(candidateId);
   if (!metrics) return 0;
   if (metricId === 'binding-score') {
@@ -596,15 +601,17 @@ export function runCandidateComparison(
   const rankingMetric = requireString(parameters, 'rankingMetric', 'plddt');
   const deduplicate = optionalBoolean(parameters, 'deduplicate', true);
   const label = requireString(parameters, 'label', 'round-1');
-  const byCandidate = asNumberMap(scored.scores);
+  const byCandidate = asNumberMap(scored.metricValues);
 
   const ranked = scored.candidates
     .map((candidate) => ({
       candidate,
-      score: scoreFor(candidate.id, rankingMetric, byCandidate),
+      rankingMetricValue: metricValueFor(candidate.id, rankingMetric, byCandidate),
     }))
     .sort((left, right) => {
-      if (left.score !== right.score) return right.score - left.score;
+      if (left.rankingMetricValue !== right.rankingMetricValue) {
+        return right.rankingMetricValue - left.rankingMetricValue;
+      }
       return left.candidate.id.localeCompare(right.candidate.id);
     });
 
@@ -620,13 +627,15 @@ export function runCandidateComparison(
   }
 
   const selectedIds = new Set(selected.map((entry) => entry.candidate.id));
-  const selectedScores = scored.scores.filter((score) => selectedIds.has(score.candidateId));
+  const selectedMetricValues = scored.metricValues.filter((metricValue) =>
+    selectedIds.has(metricValue.candidateId),
+  );
 
   const ranking: CandidateSet = CandidateSetSchema.parse({
     id: `ranking:${label}:${rankingMetric}:${scored.id}`,
     name: `Ranked candidates (${label})`,
     candidates: selected.map((entry) => entry.candidate),
-    scores: selectedScores,
+    metricValues: selectedMetricValues,
     context: {
       strategy: 'candidate-comparison',
       label,
@@ -635,28 +644,31 @@ export function runCandidateComparison(
     },
   });
 
-  const plddtScores = scored.scores
-    .filter((score) => score.metricId === 'plddt')
-    .map((score) => score.value);
-  const bestScore = plddtScores.length === 0 ? null : Math.max(...plddtScores);
+  const plddtMetricValues = scored.metricValues
+    .filter((metricValue) => metricValue.metricId === 'plddt')
+    .map((metricValue) => metricValue.value);
+  const bestMetricValue =
+    plddtMetricValues.length === 0 ? null : Math.max(...plddtMetricValues);
 
   const report: ComparisonReport = ComparisonReportSchema.parse({
     label,
     rankingMetric,
     candidateCount: scored.candidates.length,
     selectedCount: selected.length,
-    bestScore,
+    bestMetricValue,
     entries: selected.map((entry, index) => ({
       rank: index + 1,
       candidateId: entry.candidate.id,
       sequence: entry.candidate.sequence,
-      score: entry.score,
-      scores: scored.scores.filter((score) => score.candidateId === entry.candidate.id),
+      rankingMetricValue: entry.rankingMetricValue,
+      metricValues: scored.metricValues.filter(
+        (metricValue) => metricValue.candidateId === entry.candidate.id,
+      ),
     })),
   });
 
   context.log(`compared candidates=${report.candidateCount} selected=${report.selectedCount}`);
-  context.log(`compared metric=${rankingMetric} best-plddt=${bestScore ?? 'none'}`);
+  context.log(`compared metric=${rankingMetric} best-plddt=${bestMetricValue ?? 'none'}`);
   context.writeFile('ranking.json', json(ranking));
   context.writeFile('report.json', json(report));
 
@@ -689,7 +701,7 @@ export function runCandidateComparison(
     ],
     metrics: {
       selectedCount: report.selectedCount,
-      bestPlddt: bestScore ?? 0,
+      bestPlddt: bestMetricValue ?? 0,
     },
   };
 }

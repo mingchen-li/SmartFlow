@@ -152,7 +152,7 @@ describe('execution domain contracts', () => {
     expect(provenance.environment.image).toContain('candidate-generation');
   });
 
-  it('types Candidates and CandidateSets with deterministic generation context and scores', () => {
+  it('types Candidates and CandidateSets with deterministic generation context and Metric values', () => {
     const candidateSet = {
       id: 'candidate-set:seed-42',
       name: 'Generated candidates',
@@ -169,7 +169,7 @@ describe('execution domain contracts', () => {
           parentId: 'candidate-0001',
         },
       ],
-      scores: [
+      metricValues: [
         { candidateId: 'candidate-0001', metricId: 'plddt', value: 82.5 },
       ],
       context: { strategy: 'cdr-focused', seed: 42, model: 'vhh-designer-v1' },

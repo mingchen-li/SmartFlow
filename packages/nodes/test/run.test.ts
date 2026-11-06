@@ -393,14 +393,14 @@ describe('built-in deterministic Node implementations', () => {
     const structures = first.outputs.find((item) => item.portId === 'structures');
 
     expect(scored.candidates).toHaveLength(designs.candidates.length);
-    expect(scored.scores).toHaveLength(designs.candidates.length * 2);
-    for (const score of scored.scores) {
-      if (score.metricId === 'plddt') {
-        expect(score.value).toBeGreaterThanOrEqual(0);
-        expect(score.value).toBeLessThanOrEqual(100);
+    expect(scored.metricValues).toHaveLength(designs.candidates.length * 2);
+    for (const metricValue of scored.metricValues) {
+      if (metricValue.metricId === 'plddt') {
+        expect(metricValue.value).toBeGreaterThanOrEqual(0);
+        expect(metricValue.value).toBeLessThanOrEqual(100);
       } else {
-        expect(score.value).toBeGreaterThanOrEqual(0);
-        expect(score.value).toBeLessThanOrEqual(1);
+        expect(metricValue.value).toBeGreaterThanOrEqual(0);
+        expect(metricValue.value).toBeLessThanOrEqual(1);
       }
     }
     expect(structures?.artifacts).toHaveLength(designs.candidates.length);
@@ -423,8 +423,8 @@ describe('built-in deterministic Node implementations', () => {
       readFileSync(join(harness.outputDir, 'scores.csv'), 'utf8'),
     );
     expect(
-      CandidateSetSchema.parse(replayScored?.value).scores,
-    ).toEqual(scored.scores);
+      CandidateSetSchema.parse(replayScored?.value).metricValues,
+    ).toEqual(scored.metricValues);
   });
 
   it('ranks and deduplicates scored candidates and writes a typed comparison report', () => {
@@ -463,12 +463,12 @@ describe('built-in deterministic Node implementations', () => {
     expect(report.selectedCount).toBe(3);
     expect(report.entries.map((entry) => entry.rank)).toEqual([1, 2, 3]);
     for (let index = 1; index < report.entries.length; index += 1) {
-      expect(report.entries[index - 1].score).toBeGreaterThanOrEqual(
-        report.entries[index].score,
+      expect(report.entries[index - 1].rankingMetricValue).toBeGreaterThanOrEqual(
+        report.entries[index].rankingMetricValue,
       );
     }
     expect(result.metrics?.selectedCount).toBe(3);
-    expect(result.metrics?.bestPlddt).toBe(report.bestScore);
+    expect(result.metrics?.bestPlddt).toBe(report.bestMetricValue);
     expect(readJson(harness, 'report.json')).toEqual(report);
     expect(readJson(harness, 'ranking.json')).toEqual(ranking);
   });
@@ -478,6 +478,6 @@ describe('built-in deterministic Node implementations', () => {
     expect(TargetStructureSchema.parse(target).residueCount).toBe(2);
     expect(candidates.candidates.length).toBe(6);
     expect(designs.candidates.length).toBe(4);
-    expect(scored.scores.length).toBe(8);
+    expect(scored.metricValues.length).toBe(8);
   });
 });

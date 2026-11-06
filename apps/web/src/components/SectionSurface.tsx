@@ -1,4 +1,5 @@
 import type { FileReference, Run } from '@sflow/domain';
+import { statusTone } from '../display';
 import type { WorkspaceSection } from './PrimaryNav';
 
 export interface SectionSurfaceProps {
@@ -95,7 +96,7 @@ export function SectionSurface({
                 {runs.map((run) => (
                   <li key={run.id} data-testid={`run-${run.id}`}>
                     <span className="run-list-id">Run {run.id}</span>
-                    <span className={`badge badge-${run.status === 'completed' ? 'success' : run.status === 'failed' ? 'warning' : run.status === 'queued' || run.status === 'running' ? 'info' : 'neutral'}`}>
+                    <span className={`badge ${statusTone(run.status)}`}>
                       {run.status}
                     </span>
                     <span className="muted">

@@ -399,4 +399,24 @@ describe('Result View API', () => {
       ).status,
     ).toBe(404);
   });
+
+  it('refuses to serve Artifact bytes whose digest no longer matches the recorded identity', async () => {
+    const { cookie, fileReference, root } = await boot();
+    await saveWorkflow(cookie, buildWorkflow(fileReference));
+    const created = await startRun(cookie);
+    const detail = await waitForTerminal(handle!, cookie, created.id);
+    expect(detail.run.status).toBe('completed');
+
+    const artifact = detail.artifacts.find((entry) => entry.name === 'candidates.json')!;
+    writeFileSync(join(root, artifact.path), 'tampered after the Run completed', 'utf8');
+
+    const response = await getJson(
+      `${handle!.url}/api/runs/${created.id}/artifacts/${artifact.id}/download`,
+      cookie,
+    );
+    expect(response.status).toBe(409);
+    expect(await readJson(response)).toMatchObject({
+      error: { code: 'ARTIFACT_INTEGRITY_FAILED' },
+    });
+  });
 });

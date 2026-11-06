@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   CANDIDATE_SET_SCHEMA_REF,
+  PREDICTED_STRUCTURE_SCHEMA_REF,
   CandidateSetSchema,
   ResultViewDataSchema,
   ResultViewIRSchema,
@@ -77,11 +78,26 @@ function parsePatchOperations(text: string): JsonPatchOperation[] | string {
   return parsed as JsonPatchOperation[];
 }
 
-function knownSchema(schema: { namespace: string; name: string; version: string } | undefined): boolean {
-  if (!schema) return false;
-  return ['candidate-set', 'comparison-report', 'target-structure', 'predicted-structure'].includes(
-    schema.name,
-  );
+/**
+ * A schema is known when a registered Widget declares it as accepted. The
+ * registry, not a client-side allowlist, owns this knowledge (ADR-0006).
+ */
+function isKnownArtifactSchema(
+  schema: { namespace: string; name: string; version: string } | undefined,
+  acceptedSchemas: ReadonlySet<string>,
+): boolean {
+  return schema !== undefined && acceptedSchemas.has(schemaKey(schema));
+}
+
+type WidgetRenderer = 'candidate-table' | 'metric-summary' | 'structure-viewer' | 'generic';
+
+/** Selects a renderer from the Widget's declared schema contracts, not its id. */
+function widgetRenderer(widget: WidgetDescriptor): WidgetRenderer {
+  const accepted = new Set(widget.acceptedArtifactSchemas.map(schemaKey));
+  if (accepted.has(schemaKey(CANDIDATE_SET_SCHEMA_REF))) return 'candidate-table';
+  if (accepted.has(schemaKey(PREDICTED_STRUCTURE_SCHEMA_REF))) return 'structure-viewer';
+  if (widget.acceptedMetricSchemas.length > 0) return 'metric-summary';
+  return 'generic';
 }
 
 function DownloadLink({
@@ -108,11 +124,13 @@ function DownloadLink({
 function ArtifactRow({
   runId,
   artifact,
+  acceptedSchemas,
 }: {
   runId: string;
   artifact: Artifact;
+  acceptedSchemas: ReadonlySet<string>;
 }) {
-  const generic = !knownSchema(artifact.schema);
+  const generic = !isKnownArtifactSchema(artifact.schema, acceptedSchemas);
   return (
     <article
       className={`result-artifact${generic ? ' result-artifact-generic' : ''}`}
@@ -163,14 +181,14 @@ function CandidateSetSection({
               <th>Candidate</th>
               <th>Sequence</th>
               <th>Generation</th>
-              <th>Scores</th>
+              <th>Metrics</th>
             </tr>
           </thead>
           <tbody>
             {data.candidates.map((candidate) => {
-              const scores = data.scores
-                .filter((score) => score.candidateId === candidate.id)
-                .map((score) => `${score.metricId}=${score.value}`)
+              const metricValues = data.metricValues
+                .filter((metricValue) => metricValue.candidateId === candidate.id)
+                .map((metricValue) => `${metricValue.metricId}=${metricValue.value}`)
                 .join(', ');
               return (
                 <tr
@@ -182,7 +200,7 @@ function CandidateSetSection({
                     {candidate.sequence}
                   </td>
                   <td>{candidate.generation ?? '—'}</td>
-                  <td>{scores || '—'}</td>
+                  <td>{metricValues || '—'}</td>
                 </tr>
               );
             })}
@@ -508,6 +526,14 @@ export function ResultViewSurface({ runId, onClose }: ResultViewSurfaceProps) {
     };
   }, [response]);
 
+  const acceptedArtifactSchemas = useMemo(() => {
+    const keys = new Set<string>();
+    for (const widget of resolved?.widgets ?? []) {
+      for (const schema of widget.acceptedArtifactSchemas) keys.add(schemaKey(schema));
+    }
+    return keys;
+  }, [resolved]);
+
   const evaluations = useMemo(() => {
     const map = new Map<string, ResultViewBlockEvaluation>();
     for (const evaluation of resolved?.compatibility.blocks ?? []) {
@@ -694,7 +720,12 @@ export function ResultViewSurface({ runId, onClose }: ResultViewSurfaceProps) {
           ) : (
             <div className="result-artifacts">
               {artifacts.map((artifact) => (
-                <ArtifactRow key={artifact.id} runId={runId} artifact={artifact} />
+                <ArtifactRow
+                  key={artifact.id}
+                  runId={runId}
+                  artifact={artifact}
+                  acceptedSchemas={acceptedArtifactSchemas}
+                />
               ))}
             </div>
           )}
@@ -763,6 +794,7 @@ export function ResultViewSurface({ runId, onClose }: ResultViewSurfaceProps) {
     // omitted with a reason; they never fall through to arbitrary rendering.
     const widget = widgets.find((candidate) => candidate.id === block.widgetId);
     if (!widget) return null;
+    const renderer = widgetRenderer(widget);
     const widgetTestId = `result-view-widget-${widget.id}`;
     const candidateArtifacts = artifacts.filter(
       (artifact) => candidateSets[artifact.id] !== undefined,
@@ -785,7 +817,7 @@ export function ResultViewSurface({ runId, onClose }: ResultViewSurfaceProps) {
             <p className="muted" data-testid={`widget-empty-${widget.id}`}>
               No compatible data for this Widget.
             </p>
-          ) : widget.id === 'sflow.candidate-table' ? (
+          ) : renderer === 'candidate-table' ? (
             candidateArtifacts.length === 0 ? (
               <p className="muted">
                 No compatible CandidateSet data for this Widget.
@@ -799,7 +831,7 @@ export function ResultViewSurface({ runId, onClose }: ResultViewSurfaceProps) {
                 />
               ))
             )
-          ) : widget.id === 'sflow.metric-summary' ? (
+          ) : renderer === 'metric-summary' ? (
             <div className="result-metric-grid">
               {metrics.map((metric) => (
                 <article
@@ -817,7 +849,7 @@ export function ResultViewSurface({ runId, onClose }: ResultViewSurfaceProps) {
                 </article>
               ))}
             </div>
-          ) : widget.id === 'sflow.structure-viewer' ? (
+          ) : renderer === 'structure-viewer' ? (
             <ul className="result-widget-artifacts">
               {structureArtifacts.map((artifact) => (
                 <li key={artifact.id} data-testid={`structure-artifact-${artifact.id}`}>

@@ -24,18 +24,6 @@ const MONITOR_TABS: Array<{ id: MonitorTab; label: string }> = [
   { id: 'results', label: 'Results' },
 ];
 
-function taskBadgeClass(state: Task['state']): string {
-  switch (state) {
-    case 'completed':
-      return 'badge badge-success';
-    case 'failed':
-    case 'canceled':
-      return 'badge badge-warning';
-    default:
-      return 'badge badge-info';
-  }
-}
-
 export interface RunMonitorProps {
   /** Most recent Run, or null before the first Run starts. */
   run?: Run | null;
@@ -141,19 +129,24 @@ export function RunMonitor({
   const artifacts = detail?.artifacts ?? [];
   const metrics = detail?.metrics ?? [];
   const snapshotNodes = effectiveRun?.snapshot.nodes ?? [];
-  const counts = countTasks(tasks);
-  const taskLogs = useTaskLogs(effectiveRun?.id ?? null, detail?.tasks);
-  const completedPercent =
-    tasks.length === 0 ? 0 : Math.round((counts.completed / tasks.length) * 100);
-
-  const nodeOrder = new Map(
-    snapshotNodes.map((node, index) => [node.nodeId, index]),
-  );
+  // Progress is per Node, not per attempt: a retry or explicit rerun leaves the
+  // superseded attempt in the history but must not inflate or deflate the
+  // completed count.
   const latestByNode = new Map<string, Task>();
   for (const task of tasks) {
     const current = latestByNode.get(task.nodeId);
     if (!current || task.attempt > current.attempt) latestByNode.set(task.nodeId, task);
   }
+  const latestTasks = [...latestByNode.values()];
+  const taskTotal = Math.max(snapshotNodes.length, latestTasks.length);
+  const counts = countTasks(latestTasks);
+  const taskLogs = useTaskLogs(effectiveRun?.id ?? null, detail?.tasks);
+  const completedPercent =
+    taskTotal === 0 ? 0 : Math.round((counts.completed / taskTotal) * 100);
+
+  const nodeOrder = new Map(
+    snapshotNodes.map((node, index) => [node.nodeId, index]),
+  );
   const orderedTasks = [...tasks].sort((left, right) => {
     const order =
       (nodeOrder.get(left.nodeId) ?? Number.MAX_SAFE_INTEGER) -
@@ -238,19 +231,19 @@ export function RunMonitor({
               <article className="card">
                 <div className="card-header">
                   <span className="card-title">Tasks</span>
-                  <span className="badge badge-neutral">{tasks.length}</span>
+                  <span className="badge badge-neutral">{taskTotal}</span>
                 </div>
                 <div className="card-value" data-testid="monitor-progress">
-                  {counts.completed} / {tasks.length}
+                  {counts.completed} / {taskTotal}
                 </div>
                 <div
                   className="progress"
                   role="progressbar"
                   aria-label="Completed Tasks"
                   aria-valuemin={0}
-                  aria-valuemax={Math.max(tasks.length, 1)}
+                  aria-valuemax={Math.max(taskTotal, 1)}
                   aria-valuenow={counts.completed}
-                  aria-valuetext={`${counts.completed} of ${tasks.length} Tasks completed`}
+                  aria-valuetext={`${counts.completed} of ${taskTotal} Tasks completed`}
                   data-testid="monitor-progress-bar"
                 >
                   <div
@@ -310,7 +303,7 @@ export function RunMonitor({
                       >
                         <span className="attempt-node">{label}</span>
                         <span className="badge badge-neutral">Attempt {task.attempt}</span>
-                        <span className={taskBadgeClass(task.state)}>
+                        <span className={`badge ${statusTone(task.state)}`}>
                           {task.state}
                           {latest ? '' : ' (superseded)'}
                         </span>

@@ -4,7 +4,8 @@ import { z } from 'zod';
  * Typed scientific data produced by Binder Nodes (ticket #7).
  *
  * Candidate identity, CandidateSet generation/comparison context, and
- * per-candidate scores are explicit so two contexts are never silently merged.
+ * per-candidate Metric values are explicit so two contexts are never silently
+ * merged.
  * These schemas describe values carried between Tasks and stored inside
  * Artifacts; Run/Task/Provenance identity lives in `execution.ts`.
  */
@@ -30,12 +31,12 @@ export type Candidate = z.infer<typeof CandidateSchema>;
  * Node Manifest's Metric declaration; the typed Metric record with meaning,
  * unit or scale, namespaced schema, and Provenance is stored separately.
  */
-export const CandidateScoreSchema = z.strictObject({
+export const CandidateMetricValueSchema = z.strictObject({
   candidateId: z.string().min(1).max(200),
   metricId: z.string().min(1).max(200),
   value: z.number(),
 });
-export type CandidateScore = z.infer<typeof CandidateScoreSchema>;
+export type CandidateMetricValue = z.infer<typeof CandidateMetricValueSchema>;
 
 /**
  * The generation, filtering, design, or comparison context that makes a set of
@@ -55,7 +56,7 @@ export const CandidateSetSchema = z.strictObject({
   id: z.string().min(1).max(300),
   name: z.string().min(1).max(300),
   candidates: z.array(CandidateSchema),
-  scores: z.array(CandidateScoreSchema),
+  metricValues: z.array(CandidateMetricValueSchema),
   context: CandidateSetContextSchema,
 });
 export type CandidateSet = z.infer<typeof CandidateSetSchema>;
@@ -80,14 +81,14 @@ export const ComparisonReportSchema = z.strictObject({
   rankingMetric: z.string().min(1).max(200),
   candidateCount: z.number().int().nonnegative(),
   selectedCount: z.number().int().nonnegative(),
-  bestScore: z.number().nullable(),
+  bestMetricValue: z.number().nullable(),
   entries: z.array(
     z.strictObject({
       rank: z.number().int().positive(),
       candidateId: z.string().min(1).max(200),
       sequence: z.string().min(1).max(10_000),
-      score: z.number(),
-      scores: z.array(CandidateScoreSchema),
+      rankingMetricValue: z.number(),
+      metricValues: z.array(CandidateMetricValueSchema),
     }),
   ),
 });

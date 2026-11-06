@@ -27,7 +27,7 @@ export const candidateTableWidget: WidgetDescriptor = {
   version: '1.0.0',
   name: 'Candidate table',
   description:
-    'Renders CandidateSet candidates with ranks, sequences, and candidate-level scores.',
+    'Renders CandidateSet candidates with ranks, sequences, and candidate-level Metrics.',
   acceptedArtifactSchemas: [CANDIDATE_SET_SCHEMA_REF],
   acceptedMetricSchemas: [],
   interactions: ['inspect', 'download', 'select-candidate'],

@@ -62,7 +62,7 @@ const DESIGNS: CandidateSet = CandidateSetSchema.parse({
       parentId: 'candidate-0002',
     },
   ],
-  scores: [],
+  metricValues: [],
   context: { strategy: 'vhh-designer-v1', seed: 7 },
 });
 

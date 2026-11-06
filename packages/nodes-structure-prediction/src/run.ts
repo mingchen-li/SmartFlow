@@ -12,7 +12,7 @@ import {
  * Deterministic simulation of the production structure-prediction model.
  *
  * The scientific contract is the same as the deterministic fixture: pLDDT and
- * ipTM scores per design, a scored CandidateSet, a CSV summary, and predicted
+ * ipTM Metric values per design, a scored CandidateSet, a CSV summary, and predicted
  * structure files. The production package owns this implementation, so model
  * behavior, packaging, and failures stay localized here instead of leaking
  * into the Orchestrator or surrounding scientific records.
@@ -103,13 +103,13 @@ export function runProductionStructurePrediction(
     `structure-prediction-production model=${predictor} designs=${designs.candidates.length}`,
   );
 
-  const scores: CandidateSet['scores'] = [];
+  const metricValues: CandidateSet['metricValues'] = [];
   const structures: Array<{ candidateId: string; pdb: string }> = [];
 
   for (const candidate of designs.candidates) {
     const plddt = round(40 + (hashSeed(seed, 'plddt', candidate.sequence) % 6000) / 100, 2);
     const iptm = round((hashSeed(seed, 'iptm', candidate.sequence) % 10_000) / 10_000, 4);
-    scores.push(
+    metricValues.push(
       { candidateId: candidate.id, metricId: 'plddt', value: plddt },
       { candidateId: candidate.id, metricId: 'iptm', value: iptm },
     );
@@ -129,7 +129,7 @@ export function runProductionStructurePrediction(
     id: `scored-set:${predictor}:${seed}:${designs.id}`,
     name: 'Scored candidates',
     candidates: designs.candidates,
-    scores,
+    metricValues,
     context: {
       strategy: 'structure-prediction',
       seed,
@@ -144,16 +144,17 @@ export function runProductionStructurePrediction(
 
   const plddtValues: number[] = [];
   const iptmValues: number[] = [];
-  for (const score of scores) {
-    if (score.metricId === 'plddt') plddtValues.push(score.value);
-    if (score.metricId === 'iptm') iptmValues.push(score.value);
+  for (const metricValue of metricValues) {
+    if (metricValue.metricId === 'plddt') plddtValues.push(metricValue.value);
+    if (metricValue.metricId === 'iptm') iptmValues.push(metricValue.value);
   }
 
   const byCandidate = new Map<string, Map<string, number>>();
-  for (const score of scores) {
-    const metrics = byCandidate.get(score.candidateId) ?? new Map<string, number>();
-    metrics.set(score.metricId, score.value);
-    byCandidate.set(score.candidateId, metrics);
+  for (const metricValue of metricValues) {
+    const metrics =
+      byCandidate.get(metricValue.candidateId) ?? new Map<string, number>();
+    metrics.set(metricValue.metricId, metricValue.value);
+    byCandidate.set(metricValue.candidateId, metrics);
   }
 
   const csv = [
